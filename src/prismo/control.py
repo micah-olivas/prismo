@@ -50,6 +50,8 @@ def load(
                 devices.append(dev.demo.Valves(name, **params))
             case "fluidic_sipper":
                 devices.append(dev.fluidic.Sipper(name, **params))
+            case "kinetix_camera":
+                devices.append(dev.kinetix.Camera(name, core, **params))
             case "lambda_filter1":
                 devices.append(dev.sutter.Filter(name, core, filter="A", **params))
             case "lambda_filter2":
