@@ -1,7 +1,7 @@
 import threading
 import warnings
 from collections.abc import Callable, Iterator
-from typing import Any, Concatenate
+from typing import Any
 
 import dill
 import numpy as np
@@ -13,8 +13,9 @@ from .views import AcquisitionView, LiveView
 from .widgets import init_widgets
 
 
-def run_async[**P](func: Callable[P, Iterator[Any]]) -> Callable[Concatenate[bool, P], Any]:
-    def wrapper(blocking: bool = False, *args: P.args, **kwargs: P.kwargs) -> Any:
+def run_async[**P](func: Callable[P, Iterator[Any]]) -> Callable[P, Any]:
+    # `blocking` is keyword-only so that positional args pass through to `func`.
+    def wrapper(*args: P.args, blocking: bool = False, **kwargs: P.kwargs) -> Any:
         def run_func(_session):
             yield from func(*args, **kwargs)
 
