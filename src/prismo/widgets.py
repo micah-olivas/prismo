@@ -36,7 +36,6 @@ def init_widgets(
             server = ValveControllerServer(device)
             routes = {**routes, **server.routes(path)}
 
-    """
     state_devices = [d for d in ctrl.devices if isinstance(d, devices.State)]
     if state_devices:
         path = "widget/states"
@@ -49,7 +48,6 @@ def init_widgets(
         widgets["stage controller"] = lambda r, path=path: StageController(r.subpath(path))
         server = StageControllerServer(ctrl.stage)
         routes = {**routes, **server.routes(path)}
-    """
 
     return widgets, routes
 
