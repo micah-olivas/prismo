@@ -62,6 +62,15 @@ def load(
                 devices.append(dev.sutter.Shutter(name, core, shutter="A", **params))
             case "lambda_shutter2":
                 devices.append(dev.sutter.Shutter(name, core, shutter="B", **params))
+            case "light_shutter":
+                # The light must come before the shutter in the config.
+                light = next((d for d in devices if d.name == params["light"]), None)
+                if not isinstance(light, dev.lumencor.SolaLight):
+                    raise ValueError(
+                        f"light_shutter needs a sola_light or spectra_light named "
+                        f"{params['light']!r} earlier in the config."
+                    )
+                devices.append(dev.lumencor.LightShutter(name, light))
             case "manual_objective":
                 devices.append(dev.manual.Objective(name, **params))
             case "microfluidic_chip":
