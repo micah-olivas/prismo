@@ -36,7 +36,10 @@ def init_widgets(
             server = ValveControllerServer(device)
             routes = {**routes, **server.routes(path)}
 
-    state_devices = [d for d in ctrl.devices if isinstance(d, devices.State)]
+    # Only devices with a discrete list of states can be shown as a dropdown.
+    state_devices = [
+        d for d in ctrl.devices if isinstance(d, devices.State) and hasattr(d, "states")
+    ]
     if state_devices:
         path = "widget/states"
         widgets["state controller"] = lambda r, path=path: StateController(r.subpath(path))
