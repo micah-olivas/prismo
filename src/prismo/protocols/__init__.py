@@ -1,9 +1,9 @@
 import logging
 from collections.abc import Iterator
 
-from .devices.microfluidic import Chip
-from .run import run_async
-from .utils import sleep
+from ..devices.microfluidic import Chip
+from ..run import run_async
+from ..utils import sleep
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +19,10 @@ def deadend_fill(chip: Chip, buffer: str):
         Name of the buffer input.
     """
     chip.close_all()
-    chip.sandwich = "open"
-    chip.inlet = "open"
+    chip.sandR = "open"
+    chip.sandL = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
     chip[buffer] = "open"
 
 
@@ -62,7 +64,7 @@ def purge_common_inlet(
     if waste not in chip.valves:
         raise ValueError(f"{waste} does not exist in {chip.name}.")
 
-    chip.inlet[0] = "closed"
+    chip.inlet1 = "closed"
     logger.info(f"Flowing {flow} to {waste} for {wait_time} seconds.")
     chip[flow] = "open"
     chip[waste] = "open"
@@ -94,17 +96,19 @@ def purge_block_inlets(
         Whether to keep the block1 control valve open.
     """
     # Close inlets 1 and 2
-    chip.inlet = "closed"
+    chip.inlet1 = "closed"
+    chip.inlet2 = "closed"
 
     # Flow upper block inlets to lower (waste) inlets
     logger.info(f"Purging all block inlets for {wait_time} seconds.")
-    chip.block_inlet = "open"
+    chip.block1 = "open"
+    chip.block2 = "open"
     yield from sleep(wait_time)
 
     if not keep_block0_open:
-        logger.info("Leaving block 0 open.")
-        chip.block_inlet[0] = "closed"
-    chip.block_inlet[1] = "closed"
+        logger.info("Closing block1.")
+        chip.block1 = "closed"
+    chip.block2 = "closed"
     logger.info("Done purging block inlets.")
 
 
@@ -116,7 +120,7 @@ def pattern_anti_gfp(
     na: str = "na3",
     anti_gfp: str = "in4",
     pbs: str = "in5",
-    outlet: int = -1,
+    outlet: str = "out2",
 ) -> Iterator[None]:
     """Pattern a chip device to add a bbsa-na-anti_gfp pedestal under the button.
 
@@ -138,7 +142,7 @@ def pattern_anti_gfp(
         Which outlet to use ("out2" = common, "out1" = block-specific).
     """
     # Check valve mappings for the non-hard-coded valves
-    for valve in [waste, bbsa, na, anti_gfp, pbs]:
+    for valve in [waste, bbsa, na, anti_gfp, pbs, outlet]:
         if valve not in chip.valves:
             raise ValueError(f"Valve {valve} does not exist in {chip.name}.")
 
@@ -152,8 +156,9 @@ def pattern_anti_gfp(
     logger.info(f"Closed all valves for device {chip.name}")
 
     # Prep device flow state; need sandR, sandL, inlet2, and outlet open
-    chip.sandwich = "open"
-    chip.outlet[outlet] = "open"
+    chip.sandL = "open"
+    chip.sandR = "open"
+    chip[outlet] = "open"
 
     # Flow with buttons closed
     logger.info(
@@ -162,11 +167,13 @@ def pattern_anti_gfp(
     purge_common_inlet(chip, bbsa, waste, wait_time=5, blocking=True)
 
     logger.info(f"Flushing {bbsa=} through device with buttons closed for 5 min.")
-    chip.inlet = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
     yield from sleep(5 * 60)
 
     logger.info(f"Opening buttons; flowing {bbsa=} for 35 min.")
-    chip.button = "open"
+    chip.butR = "open"
+    chip.butL = "open"
     yield from sleep(35 * 60)
 
     logger.info(f"Done flowing {bbsa=}.")
@@ -176,7 +183,8 @@ def pattern_anti_gfp(
     purge_common_inlet(chip, pbs, waste, wait_time=30, blocking=True)
 
     logger.info(f"Flushing {pbs=} through device with buttons open for 10 min.")
-    chip.inlet = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
     yield from sleep(10 * 60)
 
     logger.info(f"Done flowing PBS ({pbs}).")
@@ -189,7 +197,8 @@ def pattern_anti_gfp(
     purge_common_inlet(chip, na, waste, wait_time=30, blocking=True)
 
     logger.info(f"Flushing {na=} through device with buttons open for 30 min.")
-    chip.inlet = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
     yield from sleep(30 * 60)
 
     logger.info(f"Done flowing {na=}. Flowing {pbs=} through device for 10 min.")
@@ -203,7 +212,8 @@ def pattern_anti_gfp(
     logger.info(
         f">>> Step 3: bBSA quench\nFlowing {bbsa} for 35 min with buttons closed to quench walls."
     )
-    chip.button = "closed"
+    chip.butR = "closed"
+    chip.butL = "closed"
     chip[bbsa] = "open"
     yield from sleep(35 * 60)
 
@@ -222,15 +232,18 @@ def pattern_anti_gfp(
     purge_common_inlet(chip, anti_gfp, waste, wait_time=30, blocking=True)
 
     logger.info(f"Flowing anti_gfp ({anti_gfp}) through device for 30 sec.")
-    chip.inlet = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
     yield from sleep(30)
 
     logger.info(f"Opened buttons. Flowing anti_gfp ({anti_gfp}) through device for 13.3 min.")
-    chip.button = "open"
+    chip.butR = "open"
+    chip.butL = "open"
     yield from sleep(int(13.3 * 60))
 
     logger.info(f"Flowing anti_gfp ({anti_gfp}) through device with buttons closed for 30 sec.")
-    chip.button = "closed"
+    chip.butR = "closed"
+    chip.butL = "closed"
     yield from sleep(30)
 
     logger.info(f"Done flowing {anti_gfp=} through device. Washing with {pbs=}.")
@@ -249,7 +262,7 @@ def sds_wash(
     waste: str = "waste1",
     sds: str = "bBSA2",
     pbs: str = "in5",
-    outlet: int = -1,
+    outlet: str = "out2",
     wash_lagoons: bool = True,
     keep_neck_open: bool = False,
 ) -> Iterator[None]:
@@ -277,7 +290,7 @@ def sds_wash(
         if valve not in chip.valves:
             raise ValueError(f"Valve {valve} does not exist in {chip.name}.")
 
-    logger.info(">>> SDS Wash\nValve mappings: {waste=}, {sds=}, {pbs=}, {outlet=}")
+    logger.info(f">>> SDS Wash\nValve mappings: {waste=}, {sds=}, {pbs=}, {outlet=}")
 
     deadend_fill(chip, buffer=pbs)
     chip[pbs] = "closed"
@@ -285,8 +298,9 @@ def sds_wash(
     # Flow SDS over device for 5 minutes.
     chip.neck = "open" if wash_lagoons else "closed"
     purge_common_inlet(chip, sds, waste, blocking=True)
-    chip.inlet = "open"
-    chip.outlet[outlet] = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
+    chip[outlet] = "open"
     yield from sleep(5 * 60)
 
     chip[sds] = "closed"
@@ -295,7 +309,8 @@ def sds_wash(
     # Wash with PBS for 10 minutes.
     logger.info(">>> Washing with PBS\n")
     purge_common_inlet(chip, pbs, waste, blocking=True)
-    chip.inlet = "open"
+    chip.inlet1 = "open"
+    chip.inlet2 = "open"
     chip[outlet] = "open"
     yield from sleep(10 * 60)
 
