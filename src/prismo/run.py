@@ -7,10 +7,15 @@ import dill
 import numpy as np
 import zarr as zr
 
-from .control import Control
+from .control import Control, setup_name
 from .session import Session
 from .views import AcquisitionView, LiveView
 from .widgets import init_widgets
+
+
+def _setup(ctrl: Control) -> str:
+    # A Control loaded before `setup` existed (e.g. in a live kernel) falls back to setup_name().
+    return getattr(ctrl, "setup", None) or setup_name()
 
 
 def run_async[**P](func: Callable[P, Iterator[Any]]) -> Callable[P, Any]:
@@ -65,7 +70,7 @@ def acq(ctrl: Control, file: str, acq_func: Callable[[Session], Iterator[Any]]) 
         lambda v, r: AcquisitionView(v, r, file=file, widgets=widgets),
         file,
         ctrl.snap(),
-        dict(acq_func=dill.source.getsource(acq_func)),
+        dict(setup=_setup(ctrl), acq_func=dill.source.getsource(acq_func)),
     )
 
     @session.worker
@@ -103,7 +108,7 @@ def multi_acq(
         lambda v, r: AcquisitionView(v, r, file=file, widgets=widgets, multi=True),
         file,
         ctrl.snap(),
-        dict(overlap=overlap, acq_func=dill.source.getsource(acq_func)),
+        dict(setup=_setup(ctrl), overlap=overlap, acq_func=dill.source.getsource(acq_func)),
     )
 
     @session.worker
@@ -158,7 +163,7 @@ def tiled_acq(
         ),
         file,
         ctrl.snap(),
-        dict(overlap=overlap, acq_func=dill.source.getsource(acq_func)),
+        dict(setup=_setup(ctrl), overlap=overlap, acq_func=dill.source.getsource(acq_func)),
     )
 
     @session.worker

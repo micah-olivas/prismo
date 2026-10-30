@@ -204,3 +204,18 @@ def test_device_setters(mock_core):
 
     np.testing.assert_array_equal(c.snap(), cam2.snap.return_value)
     assert c.x == 200.0
+
+
+def test_setup_name(mock_core, monkeypatch):
+    """The setup name given to load is kept; otherwise it is the computer name."""
+    import platform
+
+    import prismo.control
+
+    assert Control(mock_core, devices=[], setup="setup7").setup == "setup7"
+    assert Control(mock_core, devices=[]).setup == platform.node()
+
+    monkeypatch.setattr(prismo.control, "control", None)
+    assert prismo.control.setup_name() == platform.node()
+    monkeypatch.setattr(prismo.control, "control", Control(mock_core, devices=[], setup="setup7"))
+    assert prismo.control.setup_name() == "setup7"

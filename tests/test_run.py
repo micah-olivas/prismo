@@ -13,6 +13,7 @@ def mock_ctrl():
     c = Mock()
     c.snap.return_value = np.zeros((100, 100), dtype=np.uint16)
     c.px_len = 1.0
+    c.setup = "setup7"
     return c
 
 
@@ -206,6 +207,7 @@ def test_acq_saves_coordinates_and_attrs(tmp_path, mock_ctrl):
     assert list(result.coords["channel"].values) == channels
     assert ds.attrs["exposure"] == 50.0
     assert ds.attrs["objective"] == "20x"
+    assert ds.attrs["setup"] == "setup7"
     np.testing.assert_array_equal(result[0], frame)
     np.testing.assert_array_equal(result[1], frame * 2)
     np.testing.assert_array_equal(result[2], frame * 3)
