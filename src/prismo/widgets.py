@@ -216,35 +216,41 @@ class StateController(QWidget):
         self._relay = relay
         self._states: dict[str, str | int | float] = self._relay.get("states")
         self._options: dict[str, list[str | int | float]] = self._relay.get("options")
-        self._combos: dict[str, QComboBox] = {}
-        layout = QVBoxLayout(self)
+        self._btns: dict[str, dict[str, QPushButton]] = {}
+        self._shown: dict[str, str] = {}
+        grid = QGridLayout(self)
+        grid.setHorizontalSpacing(0)
+        grid.setVerticalSpacing(0)
         self._timer = QTimer()
         self._timer.timeout.connect(self.update_states)
         self._timer.start(10)
 
-        for name, state in self._states.items():
-            row = QHBoxLayout()
-            row.addWidget(QLabel(name))
-            combo = QComboBox()
-            for opt in self._options[name]:
-                combo.addItem(str(opt))
-            combo.setCurrentText(str(state))
-            combo.currentTextChanged.connect(functools.partial(self.set_state, name))
-            row.addWidget(combo)
-            layout.addLayout(row)
-            self._combos[name] = combo
+        # One row per device: its name, then a button for each state.
+        for row, name in enumerate(self._states):
+            grid.addWidget(QLabel(name), row, 0)
+            self._btns[name] = {}
+            for col, opt in enumerate(self._options[name], start=1):
+                btn = QPushButton(str(opt))
+                btn.setMinimumWidth(10)
+                btn.clicked.connect(functools.partial(self.set_state, name, opt))
+                grid.addWidget(btn, row, col)
+                self._btns[name][str(opt)] = btn
+        self.update_states()
 
     def update_states(self):
         self._states = self._relay.get("states")
         for name, state in self._states.items():
-            combo = self._combos[name]
-            combo.blockSignals(True)
-            combo.setCurrentText(str(state))
-            combo.blockSignals(False)
+            # Only restyle when the state changes, since this runs every 10ms.
+            if self._shown.get(name) == str(state):
+                continue
+            self._shown[name] = str(state)
+            for opt, btn in self._btns[name].items():
+                # Highlight the current state with the same style as a closed valve.
+                btn.setStyleSheet(
+                    ValveController.button_stylesheet("closed" if opt == str(state) else "open")
+                )
 
-    def set_state(self, name: str, state_str: str):
-        options = self._options[name]
-        state: str | int | float = next((s for s in options if str(s) == state_str), state_str)
+    def set_state(self, name: str, state: str | int | float):
         self._relay.post("set_state", name, state)
 
 
@@ -436,7 +442,8 @@ class ValveController(QWidget):
         self._valves[key] = state
         self._relay.post("set_valve", key, state)
 
-    def button_stylesheet(self, state: str | int) -> str:
+    @staticmethod
+    def button_stylesheet(state: str | int) -> str:
         if state == "closed":
             bg = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e3045, stop:1 #2a4060)"
             bg_hover = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #243850, stop:1 #305070)"
