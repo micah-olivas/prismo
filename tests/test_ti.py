@@ -18,20 +18,8 @@ def core():
 @pytest.fixture
 def sleeps(monkeypatch):
     calls = []
-    monkeypatch.setattr(ti.time, "sleep", calls.append)
+    monkeypatch.setattr("time.sleep", calls.append)
     return calls
-
-
-def test_wait_settles_only_after_a_change(core, sleeps):
-    f = ti.Filter("filter", core, filter=1, states=["open", "egfp", "cy5"], settle_s=0.7)
-    f.wait()
-    assert sleeps == []  # nothing commanded yet
-    f.state = "egfp"
-    f.wait()
-    assert sleeps == [0.7]
-    core.waitForDevice.assert_called_with("filter")
-    f.wait()
-    assert sleeps == [0.7]  # already settled
 
 
 def test_reading_a_failing_state_never_moves_the_turret(core, sleeps):

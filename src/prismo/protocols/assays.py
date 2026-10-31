@@ -273,6 +273,7 @@ def tiled_kinetics(
     wait_s: float | Sequence[float] = 0,
     exposure: int | Sequence[int] = 500,
     power: int | Sequence[int] = 100,
+    settle_s: float = 0.5,
     t0: float | None = None,
     light_source: str | None = "auto",
     camera: str | None = "auto",
@@ -306,6 +307,9 @@ def tiled_kinetics(
         with one per pause (so ``len(wait_s) + 1`` passes), e.g. ``[0, 30, 60, 120]``.
     exposure, power :
         Exposure (ms) and light power, one for all channels or one per channel.
+    settle_s :
+        Pause (s) after switching channels before snapping. The turret can report it is done
+        while still turning, and with no stage move in between it would blur the image.
     t0 :
         When the reaction started (``time.time()`` when you opened the buttons). Saved with the
         images, and ``seconds`` counts from it. None counts from the first pass.
@@ -331,8 +335,8 @@ def tiled_kinetics(
     powers = _per_channel(power, channels, "power")
     waits = _waits(wait_s, n_passes)
     n_passes = len(waits) + 1
-    if min(exposures) <= 0 or min(waits, default=0) < 0:
-        raise ValueError("Exposures must be positive and wait_s at least 0.")
+    if min(exposures) <= 0 or min(waits, default=0) < 0 or settle_s < 0:
+        raise ValueError("Exposures must be positive and wait_s and settle_s at least 0.")
     if os.path.exists(file):
         raise FileExistsError(f"{file} already exists; pick a new name.")
     camera, light_source = resolve_defaults(ctrl, camera, light_source)
@@ -348,6 +352,7 @@ def tiled_kinetics(
         powers=powers,
         n_passes=n_passes,
         waits=waits,
+        settle_s=settle_s,
         t0=t0,
         light_source=light_source,
         info=info,
@@ -390,6 +395,7 @@ def _kinetics_acq_func(
     powers: list[int],
     n_passes: int,
     waits: list[float],
+    settle_s: float,
     t0: float | None,
     light_source: str | None,
     info: dict[str, Any] | None,
@@ -406,6 +412,7 @@ def _kinetics_acq_func(
         imgs.attrs.update(
             info=json.dumps(info or {}),
             n_passes=n_passes,
+            settle_s=settle_s,
             px_len_um=float(ctrl.px_len),
         )
         logger.info(
@@ -419,6 +426,7 @@ def _kinetics_acq_func(
             imgs.attrs["t0"] = datetime.datetime.fromtimestamp(start).isoformat(timespec="seconds")
             if tqdm is not None:
                 bar = tqdm(total=n_passes * len(ys) * len(xs), desc="Kinetics", unit="tile")
+            current = None  # the channel the turret was last sent to
             for t in range(n_passes):
                 if t > 0 and waits[t - 1] > 0:
                     logger.info(f"Waiting {waits[t - 1]} s before pass {t + 1}")
@@ -435,6 +443,9 @@ def _kinetics_acq_func(
                     for channel, exposure, power in zip(channels, exposures, powers):
                         set_optics(ctrl, channel, exposure, power, light_source)
                         ctrl.wait()  # the stage move and the filter change
+                        if channel != current:
+                            time.sleep(settle_s)
+                            current = channel
                         mark_tile(imgs, (t, channel, y, x), time.time() - start)
                         imgs.loc[t, channel, y, x] = snap(ctrl)
                     if bar is not None:

@@ -139,8 +139,8 @@ def test_kinetics_waits_the_listed_times_between_passes(rig, tmp_path):  # noqa:
     imgs = session.arrays["kinetics"]
 
     assert imgs.sizes["time"] == 3  # one more pass than pauses
-    # Each pass is 4 tiles x 2 one-second snaps, then the pause before the next.
-    np.testing.assert_allclose(imgs["pass_start_s"], [30, 30 + 8 + 100, 30 + 16 + 150])
+    # Each pass is 4 tiles x 2 channels of (0.5 s settle + 1 s snap), then the pause.
+    np.testing.assert_allclose(imgs["pass_start_s"], [30, 30 + 12 + 100, 30 + 24 + 150])
     np.testing.assert_allclose(imgs["wait_s"], [0, 100, 50])
     secs = imgs["seconds"]
     assert secs.sel(channel="gfp").values.min() > secs.sel(channel="cy5").values.min()
@@ -151,7 +151,7 @@ def test_kinetics_waits_the_listed_times_between_passes(rig, tmp_path):  # noqa:
 def test_kinetics_same_wait_after_every_pass(rig, tmp_path):  # noqa: F811
     session = run_kinetics(rig, tmp_path / "k", n_passes=3, wait_s=20)
     imgs = session.arrays["kinetics"]
-    np.testing.assert_allclose(np.diff(imgs["pass_start_s"]), [28, 28])
+    np.testing.assert_allclose(np.diff(imgs["pass_start_s"]), [32, 32])
 
 
 def test_kinetics_quit_while_waiting_stops(rig, tmp_path):  # noqa: F811
@@ -160,6 +160,17 @@ def test_kinetics_quit_while_waiting_stops(rig, tmp_path):  # noqa: F811
     imgs = session.arrays["kinetics"]
     assert np.isfinite(imgs["seconds"].values).sum() == 8  # only the first pass
     assert rig.dev("shutter").state == "closed"
+
+
+def test_kinetics_settles_only_after_switching_channels(rig, tmp_path):  # noqa: F811
+    session = run_kinetics(rig, tmp_path / "k", n_passes=1, settle_s=2)
+    imgs = session.arrays["kinetics"]
+    # Two channels: every snap follows a switch, so each tile is 2 x (2 s settle + 1 s snap).
+    np.testing.assert_allclose(imgs["seconds"].sel(channel="cy5").values.ravel(), [2, 8, 20, 14])
+
+    session = run_kinetics(rig, tmp_path / "k1", channels=("cy5",), n_passes=1, settle_s=2)
+    secs = session.arrays["kinetics"]["seconds"].values.ravel()
+    np.testing.assert_allclose(np.sort(secs), [2, 3, 4, 5])  # one channel: only the first settles
 
 
 def test_kinetics_quit_closes_the_shutter(rig, tmp_path):  # noqa: F811
@@ -182,6 +193,8 @@ def test_kinetics_bad_arguments_move_nothing(rig, tmp_path):  # noqa: F811
         run_kinetics(rig, tmp_path / "k", n_passes=0)
     with pytest.raises(ValueError, match="n_passes must be 3"):
         run_kinetics(rig, tmp_path / "k", wait_s=[10, 10], n_passes=5)
-    with pytest.raises(ValueError, match="wait_s at least 0"):
+    with pytest.raises(ValueError, match="at least 0"):
         run_kinetics(rig, tmp_path / "k", wait_s=[10, -1])
+    with pytest.raises(ValueError, match="at least 0"):
+        run_kinetics(rig, tmp_path / "k", settle_s=-1)
     assert rig.events == [] and rig.runs == []
