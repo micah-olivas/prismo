@@ -1,9 +1,24 @@
+import time
+from collections.abc import Callable
+
 import numpy as np
 
 from .ports import Port
 
 VID = 0x10C4
 PID = 0xEA60
+
+
+def _wait(cmd: Callable[[str], str], timeout: float = 60.0):
+    # Controllers answer the status command "/" with "N" (not busy) or "B" (busy), or with ":A"
+    # when idle on some firmware. Fail instead of spinning forever if neither shows up.
+    deadline = time.monotonic() + timeout
+    response = ""
+    while time.monotonic() < deadline:
+        response = cmd("/")
+        if response.startswith(":A") or response == "N":
+            return
+    raise TimeoutError(f"ASI controller not ready after {timeout}s; last reply: {response!r}")
 
 
 class Stage:
@@ -18,8 +33,7 @@ class Stage:
         return response
 
     def wait(self):
-        while not self._cmd("/").startswith(":A"):
-            pass
+        _wait(self._cmd)
 
     def close(self):
         self._port.close()
@@ -94,8 +108,7 @@ class Focus:
         return response
 
     def wait(self):
-        while not self._cmd("/").startswith(":A"):
-            pass
+        _wait(self._cmd)
 
     def close(self):
         self._port.close()
