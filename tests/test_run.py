@@ -13,6 +13,7 @@ def mock_ctrl():
     c = Mock()
     c.snap.return_value = np.zeros((100, 100), dtype=np.uint16)
     c.px_len = 1.0
+    c.stage.units_per_um = 1.0
     return c
 
 
@@ -83,6 +84,7 @@ def test_tile_coords_rectangular_tiles():
     c = Mock()
     c.snap.return_value = np.zeros((50, 100), dtype=np.uint16)
     c.px_len = 1.0
+    c.stage.units_per_um = 1.0
     xs, ys = tile_coords(c, top_left=(0, 0), bot_right=(200, 100), overlap=0)
     assert xs[1] - xs[0] == 100
     assert ys[1] - ys[0] == 50
@@ -209,3 +211,15 @@ def test_acq_saves_coordinates_and_attrs(tmp_path, mock_ctrl):
     np.testing.assert_array_equal(result[0], frame)
     np.testing.assert_array_equal(result[1], frame * 2)
     np.testing.assert_array_equal(result[2], frame * 3)
+
+
+def test_tile_coords_converts_microns_to_stage_units(mock_ctrl):
+    mock_ctrl.stage.units_per_um = 10.0  # an ASI controller counting in 0.1 um
+    xs, ys = tile_coords(mock_ctrl, top_left=(0, 0), bot_right=(2000, 2000), overlap=0)
+    np.testing.assert_array_almost_equal(xs, [0, 1000, 2000])
+
+
+def test_tile_coords_steps_towards_bot_right(mock_ctrl):
+    xs, ys = tile_coords(mock_ctrl, top_left=(200, 0), bot_right=(0, 200), overlap=0)
+    np.testing.assert_array_almost_equal(xs, [200, 100, 0])
+    np.testing.assert_array_almost_equal(ys, [0, 100, 200])

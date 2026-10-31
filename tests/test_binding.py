@@ -59,6 +59,7 @@ class StateDevice:
 class Camera:
     def __init__(self, name, events, clock):
         self.name, self._events, self._clock, self.exposure, self.n = name, events, clock, 0, 0
+        self.px_len = 1.0
 
     def snap(self):
         self._clock.sleep(1.0)  # each tile takes a second

@@ -107,3 +107,58 @@ def test_bad_arguments_move_nothing(rig, tmp_path):  # noqa: F811
     with pytest.raises(FileExistsError):
         run(rig, tmp_path / "exists")
     assert rig.events == [] and rig.runs == []
+
+
+def run_kinetics(rig, file, **kwargs):  # noqa: F811
+    kw = dict(channels=("cy5", "gfp"), n_passes=2, top_left=[0, 0], bot_right=[10, 20])
+    return assays.tiled_kinetics(rig.ctrl, str(file), **{**kw, **kwargs})
+
+
+def test_kinetics_snaps_every_channel_before_moving(rig, tmp_path):  # noqa: F811
+    session = run_kinetics(rig, tmp_path / "k", camera=None, light_source=None)
+    imgs = session.arrays["kinetics"]
+
+    assert list(session.arrays) == ["kinetics"]  # one array holds everything
+    assert imgs.dims == ("time", "channel", "row", "col", "y", "x")
+    assert list(imgs["channel"].values) == ["cy5", "gfp"]
+    # At each tile: move, snap cy5, snap gfp, then the next move.
+    kinds = ("xy", "snap", "filter")
+    tile = [e[1] if e[0] == "filter" else e[0] for e in rig.events if e[0] in kinds]
+    assert tile[:6] == ["xy", "cy5", "snap", "gfp", "snap", "xy"]
+    assert tile.count("xy") == 8 and tile.count("snap") == 16  # 4 tiles x 2 passes, 2 channels
+    assert sorted(np.unique(imgs.values)) == list(range(1, 17))  # every image once
+    assert rig.driver.written == set()  # imaging only: no valve commands at all
+    assert rig.dev("shutter").state == "closed"
+
+
+def test_kinetics_times_count_from_t0_and_respect_the_interval(rig, tmp_path):  # noqa: F811
+    t0 = rig.clock.now - 30  # buttons opened 30 s before the call
+    session = run_kinetics(rig, tmp_path / "k", t0=t0, interval_s=100, exposure=[200, 500])
+    imgs = session.arrays["kinetics"]
+
+    np.testing.assert_allclose(imgs["pass_start_s"], [30, 130])
+    secs = imgs["seconds"]
+    assert secs.sel(channel="gfp").values.min() > secs.sel(channel="cy5").values.min()
+    assert list(imgs["exposure_ms"].values) == [200, 500]
+    assert np.isfinite(imgs["seconds"].values).all()
+
+
+def test_kinetics_quit_closes_the_shutter(rig, tmp_path):  # noqa: F811
+    rig.stop_after = 3
+    session = run_kinetics(rig, tmp_path / "k")
+    imgs = session.arrays["kinetics"]
+    assert np.isfinite(imgs["seconds"].values).sum() == 6  # 3 tiles x 2 channels
+    assert rig.dev("shutter").state == "closed"
+    assert rig.driver.written == set()
+
+
+def test_kinetics_bad_arguments_move_nothing(rig, tmp_path):  # noqa: F811
+    with pytest.raises(ValueError, match="'egfp' is not one of"):
+        run_kinetics(rig, tmp_path / "k", channels=("cy5", "egfp"))
+    with pytest.raises(ValueError, match="each once"):
+        run_kinetics(rig, tmp_path / "k", channels=("cy5", "cy5"))
+    with pytest.raises(ValueError, match="one per channel"):
+        run_kinetics(rig, tmp_path / "k", exposure=[500])
+    with pytest.raises(ValueError, match="n_passes"):
+        run_kinetics(rig, tmp_path / "k", n_passes=0)
+    assert rig.events == [] and rig.runs == []

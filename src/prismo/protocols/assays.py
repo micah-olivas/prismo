@@ -17,6 +17,28 @@ Example (1 uM Cy5-BG, Kinetix)::
         info={"ligand": "Cy5-BG", "conc_uM": 1},
     )
 
+``tiled_kinetics``: imaging-only kinetics in several channels. Set the valves yourself first,
+then tile the device back to back, snapping every channel at each tile before moving on.
+
+Example (Cy5 then eGFP at every tile, 20 passes, on the Ti)::
+
+    from prismo.protocols.assays import tiled_kinetics
+
+    chip_d1.sandL = chip_d1.sandR = "closed"
+    time.sleep(2)
+    chip_d1.butL = chip_d1.butR = "open"
+    t0 = time.time()
+    g = tiled_kinetics(
+        c,
+        "Assay/two_color_kinetics_zyla",
+        channels=("cy5", "egfp"),
+        n_passes=20,
+        top_left=d1_top_left,
+        bot_right=d1_bottom_right,
+        t0=t0,
+        info={"substrate": "BzP", "conc_uM": 78.125},
+    )
+
 The corners must be for the camera used (the Kinetix by default; ``camera="zyla"`` with the Zyla
 corners for the Zyla).
 """
@@ -236,5 +258,174 @@ def _labeling_acq_func(
                 ctrl.shutter = "closed"
                 if bar is not None:
                     bar.close()
+
+    return acq_func
+
+
+def tiled_kinetics(
+    ctrl: Control,
+    file: str,
+    *,
+    channels: Sequence[str],
+    n_passes: int,
+    top_left: Sequence[float],
+    bot_right: Sequence[float],
+    exposure: int | Sequence[int] = 500,
+    power: int | Sequence[int] = 100,
+    interval_s: float = 0,
+    t0: float | None = None,
+    light_source: str | None = "auto",
+    camera: str | None = "auto",
+    overlap: float = 0.1,
+    name: str = "kinetics",
+    info: dict[str, Any] | None = None,
+) -> Session:
+    """Tile the device `n_passes` times, snapping every channel (in order) at each tile before
+    moving on. Imaging only: it never touches a valve, so set them before calling this.
+
+    Everything goes into one array `name` of `file` (``time`` x ``channel`` x ``row`` x ``col``),
+    one compressed chunk per image. ``exposure_ms`` and ``power`` are per-channel coordinates. Per
+    image, ``seconds`` since `t0` (or since the first pass started) and the wall-clock
+    ``timestamp``; NaN for images not reached. Every pass starts at the top-left tile, so each
+    tile is sampled at the same point in every pass.
+
+    Parameters:
+    -----------
+    ctrl :
+        The controller (``c``).
+    file :
+        Zarr file for the images. Must not exist yet.
+    channels :
+        Filter cubes to snap at every tile, in order, e.g. ``("cy5", "egfp")``.
+    n_passes :
+        Number of times to tile the device.
+    top_left, bot_right :
+        Corners of the device for `camera`, e.g. ``d1_top_left`` and ``d1_bottom_right``.
+    exposure, power :
+        Exposure (ms) and light power, one for all channels or one per channel.
+    interval_s :
+        Least time between the starts of consecutive passes; 0 tiles back to back.
+    t0 :
+        When the reaction started (``time.time()`` when you opened the buttons). Saved with the
+        images, and ``seconds`` counts from it. None counts from the first pass.
+    light_source :
+        Light source (None if there is no ``light_source`` device; "auto" uses "sola" if there is
+        one). The shutter only opens while an image is snapped.
+    camera :
+        Camera to image with, like ``use_camera``: "kinetix" or "zyla". None keeps the current
+        camera; "auto" picks the Kinetix if there is one, else keeps the current camera.
+    overlap :
+        Tile overlap, as in ``pm.tiled_acq``.
+    name :
+        Name of the array in `file`.
+    info :
+        Free-form notes saved with the images, e.g. ``{"substrate": "BzP", "conc_uM": 78.125}``.
+
+    Returns the acquisition session; ``g.join()`` waits for it and ``g.quit()`` stops it.
+    """
+    channels = list(channels)
+    if not channels or len(set(channels)) != len(channels):
+        raise ValueError(f"channels needs at least one filter cube, each once, got {channels}.")
+    exposures = _per_channel(exposure, channels, "exposure")
+    powers = _per_channel(power, channels, "power")
+    if n_passes < 1 or min(exposures) <= 0 or interval_s < 0:
+        raise ValueError("n_passes and exposures must be positive and interval_s at least 0.")
+    if os.path.exists(file):
+        raise FileExistsError(f"{file} already exists; pick a new name.")
+    camera, light_source = resolve_defaults(ctrl, camera, light_source)
+    for channel in channels:
+        check_optics(ctrl, channel, light_source)
+    check_camera(ctrl, camera)
+
+    acq_func = _kinetics_acq_func(
+        ctrl,
+        name=name,
+        channels=channels,
+        exposures=exposures,
+        powers=powers,
+        n_passes=n_passes,
+        interval_s=interval_s,
+        t0=t0,
+        light_source=light_source,
+        info=info,
+    )
+    if os.path.dirname(file):
+        os.makedirs(os.path.dirname(file), exist_ok=True)
+    use_camera(ctrl, camera)  # before tiled_acq, which sizes the tiles from a snap
+    return tiled_acq(
+        ctrl, file, acq_func, overlap=overlap, top_left=tuple(top_left), bot_right=tuple(bot_right)
+    )
+
+
+def _per_channel(value: int | Sequence[int], channels: list[str], what: str) -> list[int]:
+    if isinstance(value, (int, float)):
+        return [value] * len(channels)
+    if len(value) != len(channels):
+        raise ValueError(f"Give one {what} for all channels or one per channel ({channels}).")
+    return list(value)
+
+
+def _kinetics_acq_func(
+    ctrl: Control,
+    *,
+    name: str,
+    channels: list[str],
+    exposures: list[int],
+    powers: list[int],
+    n_passes: int,
+    interval_s: float,
+    t0: float | None,
+    light_source: str | None,
+    info: dict[str, Any] | None,
+):
+    """The tiled_acq acq_func behind `tiled_kinetics`."""
+
+    def acq_func(session, xs, ys):
+        imgs = session.array(name, time=n_passes, channel=channels, row=ys, col=xs)
+        add_tile_times(imgs, ("time", "channel", "row", "col"))
+        imgs.coords["exposure_ms"] = ("channel", exposures)
+        imgs.coords["power"] = ("channel", powers)
+        imgs.coords["pass_start_s"] = ("time", np.full(n_passes, np.nan))
+        imgs.attrs.update(
+            info=json.dumps(info or {}),
+            n_passes=n_passes,
+            interval_s=interval_s,
+            px_len_um=float(ctrl.px_len),
+        )
+        logger.info(
+            f"Kinetics: {n_passes} passes of {len(ys)}x{len(xs)} tiles in {channels}, "
+            f"exposures {exposures} ms"
+        )
+
+        bar = None
+        try:
+            start = time.time() if t0 is None else t0
+            imgs.attrs["t0"] = datetime.datetime.fromtimestamp(start).isoformat(timespec="seconds")
+            if tqdm is not None:
+                bar = tqdm(total=n_passes * len(ys) * len(xs), desc="Kinetics", unit="tile")
+            pass_start = time.time()
+            for t in range(n_passes):
+                if t > 0:
+                    yield from _wait_until(pass_start + interval_s)
+                pass_start = time.time()
+                imgs["pass_start_s"].loc[t] = pass_start - start
+                logger.info(f"Pass {t + 1}/{n_passes}: {(pass_start - start) / 60:.1f} min")
+                if bar is not None:
+                    bar.set_postfix(t=f"{t + 1}/{n_passes}")
+                for x, y in snake(xs, ys):
+                    ctrl.xy = (x, y)
+                    for channel, exposure, power in zip(channels, exposures, powers):
+                        set_optics(ctrl, channel, exposure, power, light_source)
+                        ctrl.wait()  # the stage move and the filter change
+                        mark_tile(imgs, (t, channel, y, x), time.time() - start)
+                        imgs.loc[t, channel, y, x] = snap(ctrl)
+                    if bar is not None:
+                        bar.update()
+                    yield
+            logger.info("Kinetics done.")
+        finally:
+            ctrl.shutter = "closed"
+            if bar is not None:
+                bar.close()
 
     return acq_func
