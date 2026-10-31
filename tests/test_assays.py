@@ -110,7 +110,9 @@ def test_bad_arguments_move_nothing(rig, tmp_path):  # noqa: F811
 
 
 def run_kinetics(rig, file, **kwargs):  # noqa: F811
-    kw = dict(channels=("cy5", "gfp"), n_passes=2, top_left=[0, 0], bot_right=[10, 20])
+    kw = dict(channels=("cy5", "gfp"), top_left=[0, 0], bot_right=[10, 20])
+    if "wait_s" not in kwargs:
+        kw["n_passes"] = 2
     return assays.tiled_kinetics(rig.ctrl, str(file), **{**kw, **kwargs})
 
 
@@ -131,16 +133,33 @@ def test_kinetics_snaps_every_channel_before_moving(rig, tmp_path):  # noqa: F81
     assert rig.dev("shutter").state == "closed"
 
 
-def test_kinetics_times_count_from_t0_and_respect_the_interval(rig, tmp_path):  # noqa: F811
+def test_kinetics_waits_the_listed_times_between_passes(rig, tmp_path):  # noqa: F811
     t0 = rig.clock.now - 30  # buttons opened 30 s before the call
-    session = run_kinetics(rig, tmp_path / "k", t0=t0, interval_s=100, exposure=[200, 500])
+    session = run_kinetics(rig, tmp_path / "k", t0=t0, wait_s=[100, 50], exposure=[200, 500])
     imgs = session.arrays["kinetics"]
 
-    np.testing.assert_allclose(imgs["pass_start_s"], [30, 130])
+    assert imgs.sizes["time"] == 3  # one more pass than pauses
+    # Each pass is 4 tiles x 2 one-second snaps, then the pause before the next.
+    np.testing.assert_allclose(imgs["pass_start_s"], [30, 30 + 8 + 100, 30 + 16 + 150])
+    np.testing.assert_allclose(imgs["wait_s"], [0, 100, 50])
     secs = imgs["seconds"]
     assert secs.sel(channel="gfp").values.min() > secs.sel(channel="cy5").values.min()
     assert list(imgs["exposure_ms"].values) == [200, 500]
     assert np.isfinite(imgs["seconds"].values).all()
+
+
+def test_kinetics_same_wait_after_every_pass(rig, tmp_path):  # noqa: F811
+    session = run_kinetics(rig, tmp_path / "k", n_passes=3, wait_s=20)
+    imgs = session.arrays["kinetics"]
+    np.testing.assert_allclose(np.diff(imgs["pass_start_s"]), [28, 28])
+
+
+def test_kinetics_quit_while_waiting_stops(rig, tmp_path):  # noqa: F811
+    rig.stop_after = 6  # 4 tiles, then 2 s into the first pause
+    session = run_kinetics(rig, tmp_path / "k", wait_s=[600])
+    imgs = session.arrays["kinetics"]
+    assert np.isfinite(imgs["seconds"].values).sum() == 8  # only the first pass
+    assert rig.dev("shutter").state == "closed"
 
 
 def test_kinetics_quit_closes_the_shutter(rig, tmp_path):  # noqa: F811
@@ -161,4 +180,8 @@ def test_kinetics_bad_arguments_move_nothing(rig, tmp_path):  # noqa: F811
         run_kinetics(rig, tmp_path / "k", exposure=[500])
     with pytest.raises(ValueError, match="n_passes"):
         run_kinetics(rig, tmp_path / "k", n_passes=0)
+    with pytest.raises(ValueError, match="n_passes must be 3"):
+        run_kinetics(rig, tmp_path / "k", wait_s=[10, 10], n_passes=5)
+    with pytest.raises(ValueError, match="wait_s at least 0"):
+        run_kinetics(rig, tmp_path / "k", wait_s=[10, -1])
     assert rig.events == [] and rig.runs == []

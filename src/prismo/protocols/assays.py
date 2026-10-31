@@ -20,7 +20,7 @@ Example (1 uM Cy5-BG, Kinetix)::
 ``tiled_kinetics``: imaging-only kinetics in several channels. Set the valves yourself first,
 then tile the device back to back, snapping every channel at each tile before moving on.
 
-Example (Cy5 then eGFP at every tile, 20 passes, on the Ti)::
+Example (Cy5 then eGFP at every tile, 7 passes with growing pauses, on the Ti)::
 
     from prismo.protocols.assays import tiled_kinetics
 
@@ -32,7 +32,7 @@ Example (Cy5 then eGFP at every tile, 20 passes, on the Ti)::
         c,
         "Assay/two_color_kinetics_zyla",
         channels=("cy5", "egfp"),
-        n_passes=20,
+        wait_s=[0, 30, 60, 120, 300, 300],  # pause before each pass after the first
         top_left=d1_top_left,
         bot_right=d1_bottom_right,
         t0=t0,
@@ -267,12 +267,12 @@ def tiled_kinetics(
     file: str,
     *,
     channels: Sequence[str],
-    n_passes: int,
     top_left: Sequence[float],
     bot_right: Sequence[float],
+    n_passes: int | None = None,
+    wait_s: float | Sequence[float] = 0,
     exposure: int | Sequence[int] = 500,
     power: int | Sequence[int] = 100,
-    interval_s: float = 0,
     t0: float | None = None,
     light_source: str | None = "auto",
     camera: str | None = "auto",
@@ -280,7 +280,7 @@ def tiled_kinetics(
     name: str = "kinetics",
     info: dict[str, Any] | None = None,
 ) -> Session:
-    """Tile the device `n_passes` times, snapping every channel (in order) at each tile before
+    """Tile the device again and again, snapping every channel (in order) at each tile before
     moving on. Imaging only: it never touches a valve, so set them before calling this.
 
     Everything goes into one array `name` of `file` (``time`` x ``channel`` x ``row`` x ``col``),
@@ -297,14 +297,15 @@ def tiled_kinetics(
         Zarr file for the images. Must not exist yet.
     channels :
         Filter cubes to snap at every tile, in order, e.g. ``("cy5", "egfp")``.
-    n_passes :
-        Number of times to tile the device.
     top_left, bot_right :
         Corners of the device for `camera`, e.g. ``d1_top_left`` and ``d1_bottom_right``.
+    n_passes :
+        Number of times to tile the device. Can be left out when `wait_s` is a list.
+    wait_s :
+        Pause (s) after each pass before the next starts: one number for every pause, or a list
+        with one per pause (so ``len(wait_s) + 1`` passes), e.g. ``[0, 30, 60, 120]``.
     exposure, power :
         Exposure (ms) and light power, one for all channels or one per channel.
-    interval_s :
-        Least time between the starts of consecutive passes; 0 tiles back to back.
     t0 :
         When the reaction started (``time.time()`` when you opened the buttons). Saved with the
         images, and ``seconds`` counts from it. None counts from the first pass.
@@ -328,8 +329,10 @@ def tiled_kinetics(
         raise ValueError(f"channels needs at least one filter cube, each once, got {channels}.")
     exposures = _per_channel(exposure, channels, "exposure")
     powers = _per_channel(power, channels, "power")
-    if n_passes < 1 or min(exposures) <= 0 or interval_s < 0:
-        raise ValueError("n_passes and exposures must be positive and interval_s at least 0.")
+    waits = _waits(wait_s, n_passes)
+    n_passes = len(waits) + 1
+    if min(exposures) <= 0 or min(waits, default=0) < 0:
+        raise ValueError("Exposures must be positive and wait_s at least 0.")
     if os.path.exists(file):
         raise FileExistsError(f"{file} already exists; pick a new name.")
     camera, light_source = resolve_defaults(ctrl, camera, light_source)
@@ -344,7 +347,7 @@ def tiled_kinetics(
         exposures=exposures,
         powers=powers,
         n_passes=n_passes,
-        interval_s=interval_s,
+        waits=waits,
         t0=t0,
         light_source=light_source,
         info=info,
@@ -355,6 +358,19 @@ def tiled_kinetics(
     return tiled_acq(
         ctrl, file, acq_func, overlap=overlap, top_left=tuple(top_left), bot_right=tuple(bot_right)
     )
+
+
+def _waits(wait_s: float | Sequence[float], n_passes: int | None) -> list[float]:
+    """One pause per gap between passes."""
+    if isinstance(wait_s, (int, float)):
+        if n_passes is None or n_passes < 1:
+            raise ValueError("Give n_passes (at least 1), or a list of wait_s.")
+        return [float(wait_s)] * (n_passes - 1)
+    if n_passes is not None and n_passes != len(wait_s) + 1:
+        raise ValueError(
+            f"wait_s has {len(wait_s)} pauses, so n_passes must be {len(wait_s) + 1} or left out."
+        )
+    return [float(w) for w in wait_s]
 
 
 def _per_channel(value: int | Sequence[int], channels: list[str], what: str) -> list[int]:
@@ -373,7 +389,7 @@ def _kinetics_acq_func(
     exposures: list[int],
     powers: list[int],
     n_passes: int,
-    interval_s: float,
+    waits: list[float],
     t0: float | None,
     light_source: str | None,
     info: dict[str, Any] | None,
@@ -386,10 +402,10 @@ def _kinetics_acq_func(
         imgs.coords["exposure_ms"] = ("channel", exposures)
         imgs.coords["power"] = ("channel", powers)
         imgs.coords["pass_start_s"] = ("time", np.full(n_passes, np.nan))
+        imgs.coords["wait_s"] = ("time", [0.0, *waits])  # pause before each pass
         imgs.attrs.update(
             info=json.dumps(info or {}),
             n_passes=n_passes,
-            interval_s=interval_s,
             px_len_um=float(ctrl.px_len),
         )
         logger.info(
@@ -403,10 +419,12 @@ def _kinetics_acq_func(
             imgs.attrs["t0"] = datetime.datetime.fromtimestamp(start).isoformat(timespec="seconds")
             if tqdm is not None:
                 bar = tqdm(total=n_passes * len(ys) * len(xs), desc="Kinetics", unit="tile")
-            pass_start = time.time()
             for t in range(n_passes):
-                if t > 0:
-                    yield from _wait_until(pass_start + interval_s)
+                if t > 0 and waits[t - 1] > 0:
+                    logger.info(f"Waiting {waits[t - 1]} s before pass {t + 1}")
+                    if bar is not None:
+                        bar.set_postfix(t=f"{t + 1}/{n_passes}", step=f"waiting {waits[t - 1]} s")
+                    yield from _wait_until(time.time() + waits[t - 1])
                 pass_start = time.time()
                 imgs["pass_start_s"].loc[t] = pass_start - start
                 logger.info(f"Pass {t + 1}/{n_passes}: {(pass_start - start) / 60:.1f} min")
