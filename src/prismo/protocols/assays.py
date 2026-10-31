@@ -42,6 +42,7 @@ from .imaging import (
     check_camera,
     check_optics,
     mark_tile,
+    resolve_defaults,
     set_optics,
     snake,
     snap,
@@ -67,9 +68,9 @@ def snap_labeling_kinetics(
     exposure: int = 500,
     channel: str = "cy5",
     power: int = 100,
-    light_source: str | None = "sola",
+    light_source: str | None = "auto",
     name: str = "cy5",
-    camera: str | None = "kinetix",
+    camera: str | None = "auto",
     buttons: Sequence[str] = ("butL", "butR"),
     sandwiches: Sequence[str] = ("sandL", "sandR"),
     overlap: float = 0.1,
@@ -101,12 +102,13 @@ def snap_labeling_kinetics(
         Corners of the device for `camera`, e.g. ``d1_top_left`` and ``d1_bottom_right``.
     exposure, channel, power, light_source :
         Exposure (ms), filter cube, light power and light source (None if there is no
-        ``light_source`` device). The shutter only opens while a tile is snapped.
+        ``light_source`` device; "auto" uses "sola" if there is one). The shutter only opens while a tile is snapped.
     name :
         The images are saved as array ``{name}_{exposure}ms`` in `file`.
     camera :
         Camera to image with, selected (and the lightpath sent to it) before tiling, like
-        ``use_camera``: "kinetix" or "zyla". None keeps the current camera.
+        ``use_camera``: "kinetix" or "zyla". None keeps the current camera; "auto"
+        picks the Kinetix if there is one, else keeps the current camera.
     buttons, sandwiches :
         The device's button and sandwich valves.
     overlap :
@@ -125,6 +127,7 @@ def snap_labeling_kinetics(
     _check(chip, {}, [*buttons, *sandwiches])
     if set(_necks(chip)) & {*buttons, *sandwiches}:
         raise ValueError("A neck can't be a button or sandwich valve; necks are left alone.")
+    camera, light_source = resolve_defaults(ctrl, camera, light_source)
     check_optics(ctrl, channel, light_source)
     check_camera(ctrl, camera)
 

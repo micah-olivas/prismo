@@ -28,7 +28,14 @@ from ..devices.microfluidic import Chip
 from ..run import tiled_acq
 from ..session import Session
 from ._common import LOG_FILE, _check, _GuardedChip, _launch, _Progress, _purge, _set_all
-from .imaging import camera_name, check_camera, check_optics, tile_acq_func, use_camera
+from .imaging import (
+    camera_name,
+    check_camera,
+    check_optics,
+    resolve_defaults,
+    tile_acq_func,
+    use_camera,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,10 +125,10 @@ def sds_wash_series(
     exposures: Sequence[int] = (500,),
     channel: str = "gfp",
     power: int = 100,
-    light_source: str | None = "sola",
+    light_source: str | None = "auto",
     out_dir: str = "GFP",
     name: str = "egfp",
-    camera: str | None = "kinetix",
+    camera: str | None = "auto",
     waste: str = "waste",
     outlet: str = "out",
     inlet: str = "inlet",
@@ -148,18 +155,21 @@ def sds_wash_series(
     n_washes :
         Number of wash + image rounds.
     exposures, channel, power, light_source :
-        Exposures (ms) to tile after each wash, filter cube, light power and light source.
+        Exposures (ms) to tile after each wash, filter cube, light power and light source
+        ("auto" uses "sola" if there is a ``light_source`` device).
     out_dir, name :
         Where the images go, and the name they start with.
     camera :
         Camera to image with, selected (and the lightpath sent to it) before the first wash, like
-        ``use_camera``: "kinetix" or "zyla". None keeps the current camera.
+        ``use_camera``: "kinetix" or "zyla". None keeps the current camera; "auto"
+        picks the Kinetix if there is one, else keeps the current camera.
     info :
         Free-form notes saved in the patterning log with every wash.
     """
     if n_washes < 1 or not exposures:
         raise ValueError("n_washes must be at least 1, with at least one exposure.")
     _check(chip, dict(sds=sds, pbs=pbs, waste=waste, outlet=outlet), [inlet, *buttons, *sandwiches])
+    camera, light_source = resolve_defaults(ctrl, camera, light_source)
     check_optics(ctrl, channel, light_source)
     check_camera(ctrl, camera)
     cam = camera if camera is not None else camera_name(ctrl)
