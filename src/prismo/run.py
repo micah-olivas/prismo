@@ -212,6 +212,13 @@ def tile_coords(
     overlap_y = int(round(overlap * height))
     delta_x = (width - overlap_x) * ctrl.px_len
     delta_y = (height - overlap_y) * ctrl.px_len
-    xs = np.arange(top_left[0], bot_right[0] + delta_x - 1, delta_x)
-    ys = np.arange(top_left[1], bot_right[1] + delta_y - 1, delta_y)
+    xs = _tile_axis(top_left[0], bot_right[0], delta_x)
+    ys = _tile_axis(top_left[1], bot_right[1], delta_y)
     return xs, ys
+
+
+def _tile_axis(start: float, stop: float, delta: float) -> np.ndarray:
+    # Stage axes can run either way across the device (x decreases left to right on the Ti), so
+    # step from start towards stop, covering stop with one last tile.
+    step = delta if stop >= start else -delta
+    return np.arange(start, stop + step - np.sign(step), step)
