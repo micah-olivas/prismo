@@ -1,12 +1,25 @@
+import time
+
 from pymmcore import CMMCore
 
 from . import utils
 
 
 class Filter:
-    def __init__(self, name: str, core: CMMCore, filter: int, states: list[str] | None = None):
+    def __init__(
+        self,
+        name: str,
+        core: CMMCore,
+        filter: int,
+        states: list[str] | None = None,
+        settle_s: float = 0.5,
+    ):
         self.name = name
         self._core = core
+        # The Ti can report the turret as ready while it is still turning, so wait() also pauses
+        # this long after a change.
+        self._settle_s = settle_s
+        self._moved = False
         self.states: list[int] | list[str]
         if "ti_scope" not in core.getLoadedDevices():
             core.loadDevice("ti_scope", "NikonTI", "TIScope")
@@ -29,20 +42,24 @@ class Filter:
 
     def wait(self):
         self._core.waitForDevice(self.name)
+        if self._moved:
+            self._moved = False
+            time.sleep(self._settle_s)
 
     @property
     def state(self) -> int | str:
+        # Never move the turret here: the GUI reads this constantly, including mid-move.
         try:
             if isinstance(self.states[0], int):
                 return self._core.getState(self.name)
             else:
                 return self._core.getStateLabel(self.name)
         except Exception:
-            self.state = self.states[0]
-            return self.states[0]
+            return "unknown"
 
     @state.setter
     def state(self, new_state: int | str):
+        self._moved = True
         # Run set state twice because ti1 scopes will reset the state to 0 when
         # the filter wheel is manually moved no matter the value of new_state.
         if isinstance(new_state, int):
