@@ -210,8 +210,10 @@ def tile_coords(
     height = tile.shape[0]
     overlap_x = int(round(overlap * width))
     overlap_y = int(round(overlap * height))
-    delta_x = (width - overlap_x) * ctrl.px_len
-    delta_y = (height - overlap_y) * ctrl.px_len
+    # px_len is in microns; convert to stage units.
+    units_per_um = getattr(ctrl.stage, "units_per_um", 1.0)
+    delta_x = (width - overlap_x) * ctrl.px_len * units_per_um
+    delta_y = (height - overlap_y) * ctrl.px_len * units_per_um
     xs = _tile_axis(top_left[0], bot_right[0], delta_x)
     ys = _tile_axis(top_left[1], bot_right[1], delta_y)
     return xs, ys

@@ -22,8 +22,11 @@ def _wait(cmd: Callable[[str], str], timeout: float = 60.0):
 
 
 class Stage:
-    def __init__(self, name: str, port: str | None = None):
+    def __init__(self, name: str, port: str | None = None, units_per_um: float = 1.0):
         self.name = name
+        # Stage units per micron: 10 on controllers that count in 0.1 um. Positions stay in stage
+        # units; this is only used to convert distances measured in microns, like tile sizes.
+        self.units_per_um = units_per_um
         self._port = Port(VID, PID, port, baudrate=9600, timeout=2.0)
 
     def _cmd(self, cmd: str) -> str:
