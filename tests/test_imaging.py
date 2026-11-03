@@ -31,6 +31,13 @@ def test_camera_none_keeps_the_current_one(rig, tmp_path):  # noqa: F811
     assert rig.runs[0]["camera"] == "camera"  # the Zyla, as selected
 
 
+def test_zyla_device_can_be_named_zyla(rig, tmp_path):  # noqa: F811
+    rig.dev("camera").name = "zyla"  # newer configs; older ones call it 'camera'
+    tile(rig, tmp_path / "a", camera="zyla")
+    assert rig.runs[0]["camera"] == "zyla" and rig.dev("lightpath").state == "zyla"
+    assert imaging.camera_name(rig.ctrl) == "zyla"
+
+
 def test_bad_arguments_fail_before_anything_moves(rig, tmp_path):  # noqa: F811
     with pytest.raises(ValueError, match="'egfp' is not one of"):
         tile(rig, tmp_path / "a", channel="egfp")
