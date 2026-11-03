@@ -38,25 +38,20 @@ def init_widgets(
             server = ValveControllerServer(device)
             routes = {**routes, **server.routes(path)}
 
-    # Only devices with a discrete list of states can be shown as a dropdown.
+    # One panel for the optics: a row of buttons per device with discrete states (filter,
+    # shutter, ...) and a slider per light, since lights have a level (c.light = 0-100).
     state_devices = [
         d for d in ctrl.devices if isinstance(d, devices.State) and hasattr(d, "states")
     ]
-    if state_devices:
+    lights = [d for d in ctrl.devices if isinstance(d, devices.lumencor.SolaLight)]
+    if state_devices or lights:
         path = "widget/states"
-        widgets["state controller"] = lambda r, path=path: StateController(r.subpath(path))
+        light_names = [d.name for d in lights]
+        widgets["optics"] = lambda r, path=path: StateController(r.subpath(path), light_names)
         server = StateControllerServer(state_devices)
         routes = {**routes, **server.routes(path)}
-
-    # Lights have a level (c.light = 0-100) rather than a list of states, so they get a slider.
-    for device in ctrl.devices:
-        if isinstance(device, devices.lumencor.SolaLight):
-            path = f"widget/{device.name}"
-            widgets[f"{device.name} controller"] = lambda r, path=path: LightController(
-                r.subpath(path)
-            )
-            server = LightControllerServer(device)
-            routes = {**routes, **server.routes(path)}
+        for light in lights:
+            routes = {**routes, **LightControllerServer(light).routes(f"{path}/{light.name}")}
 
     if ctrl.stage is not None:
         path = "widget/stage"
@@ -223,7 +218,9 @@ class PositionSelector(QWidget):
 
 
 class StateController(QWidget):
-    def __init__(self, relay: "Relay"):
+    """The optics panel: a row of buttons per state device and a power slider per light."""
+
+    def __init__(self, relay: "Relay", lights: list[str] | None = None):
         super().__init__()
         self._relay = relay
         self._states: dict[str, str | int | float] = self._relay.get("states")
@@ -231,22 +228,38 @@ class StateController(QWidget):
         self._btns: dict[str, dict[str, QPushButton]] = {}
         self._shown: dict[str, str] = {}
         grid = QGridLayout(self)
-        grid.setHorizontalSpacing(0)
-        grid.setVerticalSpacing(0)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
         self._timer = QTimer()
         self._timer.timeout.connect(self.update_states)
         self._timer.start(10)
 
-        # One row per device: its name, then a button for each state.
-        for row, name in enumerate(self._states):
-            grid.addWidget(QLabel(name), row, 0)
+        # The light's power goes right under the shutter, since they're used together.
+        rows: list[tuple[str, bool]] = [(name, False) for name in self._states]
+        at = next((i + 1 for i, (n, _) in enumerate(rows) if n == "shutter"), len(rows))
+        rows[at:at] = [(name, True) for name in lights or []]
+
+        # One row per device: its name, then its buttons (sharing the row equally) or slider.
+        for row, (name, is_light) in enumerate(rows):
+            label = QLabel(name)
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            grid.addWidget(label, row, 0)
+            if is_light:
+                grid.addWidget(LightController(self._relay.subpath(name)), row, 1)
+                continue
+            line = QHBoxLayout()
+            line.setSpacing(4)
             self._btns[name] = {}
-            for col, opt in enumerate(self._options[name], start=1):
+            for opt in self._options[name]:
                 btn = QPushButton(str(opt))
-                btn.setMinimumWidth(10)
+                btn.setMinimumSize(44, 26)
                 btn.clicked.connect(functools.partial(self.set_state, name, opt))
-                grid.addWidget(btn, row, col)
+                line.addWidget(btn, 1)
                 self._btns[name][str(opt)] = btn
+            grid.addLayout(line, row, 1)
+        grid.setRowStretch(len(rows), 1)  # keep the rows together at the top
         self.update_states()
 
     def update_states(self):
@@ -258,9 +271,8 @@ class StateController(QWidget):
             self._shown[name] = str(state)
             for opt, btn in self._btns[name].items():
                 # Highlight the current state with the same style as a closed valve.
-                btn.setStyleSheet(
-                    ValveController.button_stylesheet("closed" if opt == str(state) else "open")
-                )
+                style = ValveController.button_stylesheet("closed" if opt == str(state) else "open")
+                btn.setStyleSheet(style + "QPushButton { padding: 4px 6px; margin: 0px; }")
 
     def set_state(self, name: str, state: str | int | float):
         self._relay.post("set_state", name, state)
@@ -294,13 +306,16 @@ class LightController(QWidget):
         super().__init__()
         self._relay = relay
         layout = QHBoxLayout(self)
-        layout.addWidget(QLabel("power"))
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(0, 100)
         self._box = QSpinBox()
         self._box.setRange(0, 100)
-        layout.addWidget(self._slider)
+        self._box.setSuffix(" %")
+        self._box.setMinimumWidth(64)
+        layout.addWidget(self._slider, 1)
         layout.addWidget(self._box)
 
         level = self._relay.get("level")
