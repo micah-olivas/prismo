@@ -11,6 +11,8 @@ from qtpy.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +47,16 @@ def init_widgets(
         widgets["state controller"] = lambda r, path=path: StateController(r.subpath(path))
         server = StateControllerServer(state_devices)
         routes = {**routes, **server.routes(path)}
+
+    # Lights have a level (c.light = 0-100) rather than a list of states, so they get a slider.
+    for device in ctrl.devices:
+        if isinstance(device, devices.lumencor.SolaLight):
+            path = f"widget/{device.name}"
+            widgets[f"{device.name} controller"] = lambda r, path=path: LightController(
+                r.subpath(path)
+            )
+            server = LightControllerServer(device)
+            routes = {**routes, **server.routes(path)}
 
     if ctrl.stage is not None:
         path = "widget/stage"
@@ -273,6 +285,71 @@ class StateControllerServer:
 
     def set_state(self, name: str, state: str | int | float):
         self._devices[name].state = state
+
+
+class LightController(QWidget):
+    """A slider and box for the light level (c.light), e.g. to turn the power down while imaging."""
+
+    def __init__(self, relay: "Relay"):
+        super().__init__()
+        self._relay = relay
+        layout = QHBoxLayout(self)
+        layout.addWidget(QLabel("power"))
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 100)
+        self._box = QSpinBox()
+        self._box.setRange(0, 100)
+        layout.addWidget(self._slider)
+        layout.addWidget(self._box)
+
+        level = self._relay.get("level")
+        self._slider.setValue(level)
+        self._box.setValue(level)
+        # Only send the level once the slider is let go, so dragging doesn't flood the light.
+        self._slider.sliderReleased.connect(lambda: self.set_level(self._slider.value()))
+        self._slider.valueChanged.connect(self._slider_moved)
+        self._box.editingFinished.connect(lambda: self.set_level(self._box.value()))
+
+        # Show changes made from the notebook too (e.g. a protocol setting the power).
+        self._timer = QTimer()
+        self._timer.timeout.connect(self.update_level)
+        self._timer.start(250)
+
+    def _slider_moved(self, value: int):
+        self._box.blockSignals(True)
+        self._box.setValue(value)
+        self._box.blockSignals(False)
+        # Clicks and arrow keys move the slider without a release.
+        if not self._slider.isSliderDown():
+            self.set_level(value)
+
+    def update_level(self):
+        if self._slider.isSliderDown() or self._box.hasFocus():
+            return
+        level = self._relay.get("level")
+        for w in (self._slider, self._box):
+            if w.value() != level:
+                w.blockSignals(True)
+                w.setValue(level)
+                w.blockSignals(False)
+
+    def set_level(self, level: int):
+        self._relay.post("set_level", level)
+
+
+class LightControllerServer:
+    def __init__(self, light: devices.lumencor.SolaLight):
+        self._light = light
+
+    def routes(self, path: str) -> dict[str, Callable[..., Any]]:
+        return {path + "/level": self.get_level, path + "/set_level": self.set_level}
+
+    def get_level(self) -> int:
+        return int(self._light.state)
+
+    def set_level(self, level: int):
+        self._light.state = int(level)
 
 
 class StageController(QWidget):

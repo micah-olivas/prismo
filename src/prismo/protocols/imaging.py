@@ -226,6 +226,8 @@ def tile_acq_func(
     def acq_func(session, xs, ys):
         imgs = session.array(f"{name}_{exposure}ms", row=ys, col=xs)
         add_tile_times(imgs, ("row", "col"))
+        # The light level each tile was actually snapped at, since it can be changed in napari.
+        imgs.coords["tile_power"] = (("row", "col"), np.full((len(ys), len(xs)), np.nan))
         imgs.attrs.update(channel=channel, exposure_ms=exposure, power=power, **(attrs or {}))
         start = time.time()
         bar = (
@@ -239,6 +241,7 @@ def tile_acq_func(
                 ctrl.xy = (x, y)
                 ctrl.wait()
                 mark_tile(imgs, (y, x), time.time() - start)
+                imgs["tile_power"].loc[y, x] = ctrl.light
                 imgs.loc[y, x] = snap(ctrl)
                 if bar is not None:
                     bar.update()
