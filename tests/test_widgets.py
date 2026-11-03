@@ -87,3 +87,29 @@ def test_grid_map_follows_the_view_and_jumps_on_click(app):
     gm._jump(Pos(left + w / 2, top + h / 4))
     y, x = viewer.camera.center[-2:]
     assert y == pytest.approx(rows * tile / 4) and x == pytest.approx(cols * tile / 2)
+
+
+def test_exposure_box_reads_sets_halves_and_doubles(app):
+    class Ctrl:
+        exposure = 100.0
+
+    ctrl = Ctrl()
+    routes = widgets.ExposureControllerServer(ctrl).routes("p")
+
+    class Relay:
+        def get(self, k):
+            return routes["p/" + k]()
+
+        def post(self, k, *a):
+            routes["p/" + k](*a)
+
+    box = widgets.ExposureController(Relay())
+    assert box._box.value() == 100.0
+    box.scale(0.5)
+    assert ctrl.exposure == 50.0
+    box.scale(2.0)
+    box.scale(2.0)
+    assert ctrl.exposure == 200.0
+    ctrl.exposure = 12.5  # changed from the notebook
+    box.update_ms()
+    assert box._box.value() == 12.5

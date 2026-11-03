@@ -7,6 +7,7 @@ from qtpy.QtCore import QPointF, QRectF, Qt, QTimer
 from qtpy.QtGui import QColor, QDoubleValidator, QPainter, QPen
 from qtpy.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -40,19 +41,25 @@ def init_widgets(
             routes = {**routes, **server.routes(path)}
 
     # One panel for the optics: a row of buttons per device with discrete states (filter,
-    # shutter, ...) and a slider per light, since lights have a level (c.light = 0-100).
+    # shutter, ...), a slider per light, since lights have a level (c.light = 0-100), and the
+    # camera's exposure.
     state_devices = [
         d for d in ctrl.devices if isinstance(d, devices.State) and hasattr(d, "states")
     ]
     lights = [d for d in ctrl.devices if isinstance(d, devices.lumencor.SolaLight)]
-    if state_devices or lights:
+    has_camera = ctrl.camera is not None
+    if state_devices or lights or has_camera:
         path = "widget/states"
         light_names = [d.name for d in lights]
-        widgets["optics"] = lambda r, path=path: StateController(r.subpath(path), light_names)
+        widgets["optics"] = lambda r, path=path: StateController(
+            r.subpath(path), light_names, exposure=has_camera
+        )
         server = StateControllerServer(state_devices)
         routes = {**routes, **server.routes(path)}
         for light in lights:
             routes = {**routes, **LightControllerServer(light).routes(f"{path}/{light.name}")}
+        if has_camera:
+            routes = {**routes, **ExposureControllerServer(ctrl).routes(f"{path}/exposure")}
 
     if ctrl.stage is not None:
         path = "widget/stage"
@@ -219,9 +226,10 @@ class PositionSelector(QWidget):
 
 
 class StateController(QWidget):
-    """The optics panel: a row of buttons per state device and a power slider per light."""
+    """The optics panel: a row of buttons per state device, a power slider per light, and the
+    camera's exposure."""
 
-    def __init__(self, relay: "Relay", lights: list[str] | None = None):
+    def __init__(self, relay: "Relay", lights: list[str] | None = None, exposure: bool = False):
         super().__init__()
         self._relay = relay
         self._states: dict[str, str | int | float] = self._relay.get("states")
@@ -237,18 +245,25 @@ class StateController(QWidget):
         self._timer.timeout.connect(self.update_states)
         self._timer.start(10)
 
-        # The light's power goes right under the shutter, since they're used together.
-        rows: list[tuple[str, bool]] = [(name, False) for name in self._states]
+        # The light's power and the exposure go right under the shutter, since they're used
+        # together.
+        rows: list[tuple[str, str]] = [(name, "state") for name in self._states]
         at = next((i + 1 for i, (n, _) in enumerate(rows) if n == "shutter"), len(rows))
-        rows[at:at] = [(name, True) for name in lights or []]
+        extra = [(name, "light") for name in lights or []]
+        if exposure:
+            extra.append(("exposure", "exposure"))
+        rows[at:at] = extra
 
-        # One row per device: its name, then its buttons (sharing the row equally) or slider.
-        for row, (name, is_light) in enumerate(rows):
+        # One row per device: its name, then its buttons (sharing the row equally), slider or box.
+        for row, (name, kind) in enumerate(rows):
             label = QLabel(name)
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             grid.addWidget(label, row, 0)
-            if is_light:
+            if kind == "light":
                 grid.addWidget(LightController(self._relay.subpath(name)), row, 1)
+                continue
+            if kind == "exposure":
+                grid.addWidget(ExposureController(self._relay.subpath("exposure")), row, 1)
                 continue
             line = QHBoxLayout()
             line.setSpacing(4)
@@ -352,6 +367,71 @@ class LightController(QWidget):
 
     def set_level(self, level: int):
         self._relay.post("set_level", level)
+
+
+class ExposureController(QWidget):
+    """A box for the camera's exposure (c.exposure), in ms, with buttons to halve or double it."""
+
+    def __init__(self, relay: "Relay"):
+        super().__init__()
+        self._relay = relay
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._box = QDoubleSpinBox()
+        self._box.setRange(0.01, 100000.0)
+        self._box.setDecimals(2)
+        self._box.setSuffix(" ms")
+        self._box.setMinimumWidth(96)
+        self._box.setValue(self._relay.get("ms"))
+        self._box.editingFinished.connect(lambda: self.set_ms(self._box.value()))
+        layout.addWidget(self._box, 1)
+        for text, factor in (("÷2", 0.5), ("×2", 2.0)):
+            btn = QPushButton(text)
+            btn.setMinimumSize(36, 26)
+            btn.setStyleSheet(
+                ValveController.button_stylesheet("open")
+                + "QPushButton { padding: 4px 6px; margin: 0px; }"
+            )
+            btn.clicked.connect(functools.partial(self.scale, factor))
+            layout.addWidget(btn)
+
+        # Show changes made from the notebook too (e.g. a protocol setting the exposure).
+        self._timer = QTimer()
+        self._timer.timeout.connect(self.update_ms)
+        self._timer.start(250)
+
+    def update_ms(self):
+        if self._box.hasFocus():
+            return
+        ms = self._relay.get("ms")
+        if abs(self._box.value() - ms) > 1e-6:
+            self._box.blockSignals(True)
+            self._box.setValue(ms)
+            self._box.blockSignals(False)
+
+    def scale(self, factor: float):
+        ms = min(max(self._box.value() * factor, self._box.minimum()), self._box.maximum())
+        self._box.setValue(ms)
+        self.set_ms(ms)
+
+    def set_ms(self, ms: float):
+        self._relay.post("set_ms", ms)
+
+
+class ExposureControllerServer:
+    def __init__(self, ctrl: "Control"):
+        self._ctrl = ctrl
+
+    def routes(self, path: str) -> dict[str, Callable[..., Any]]:
+        return {path + "/ms": self.get_ms, path + "/set_ms": self.set_ms}
+
+    def get_ms(self) -> float:
+        return float(self._ctrl.exposure)
+
+    def set_ms(self, ms: float):
+        self._ctrl.exposure = float(ms)
 
 
 class LightControllerServer:

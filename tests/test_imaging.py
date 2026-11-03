@@ -24,6 +24,7 @@ def test_tiles_once_in_the_chosen_channel_on_the_kinetix(rig, tmp_path):  # noqa
             assert rig.events[i + 1] == ("shutter", "closed")
     assert not np.isnan(imgs["seconds"].values).any()
     assert (imgs["tile_power"].values == 100).all()
+    assert (imgs["tile_exposure_ms"].values == 200).all()
     assert (tmp_path / "GFP").is_dir()
 
 
