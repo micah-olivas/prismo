@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
+from ..control import setup_name
 from ..devices.microfluidic import Chip
 from ..run import run_async
 from ..session import Session
@@ -244,7 +245,13 @@ def _launch(
     """Run `body(guarded_chip, progress)` in a background session with logging and the guard."""
     logger.info(f"{protocol} on {chip.name}: { {k: v for k, v in record.items() if k != 'times'} }")
     entry = dict(
-        protocol=protocol, chip=chip.name, **record, info=info or {}, steps=[], completed=False
+        protocol=protocol,
+        setup=setup_name(),
+        chip=chip.name,
+        **record,
+        info=info or {},
+        steps=[],
+        completed=False,
     )
     g = _GuardedChip(chip, forbid_open=forbid_open)
 

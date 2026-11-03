@@ -1,4 +1,5 @@
 import os
+import platform
 import weakref
 from typing import Any
 
@@ -10,8 +11,13 @@ control = None
 
 
 def load(
-    config: dict[str, dict[str, Any] | str], path: str | None = None, singleton: bool = True
+    config: dict[str, dict[str, Any] | str],
+    path: str | None = None,
+    singleton: bool = True,
+    setup: str | None = None,
 ) -> "Control":
+    """Load the devices in `config`. `setup` names this setup (e.g. "setup7"); it is saved with
+    every acquisition and protocol log entry, and defaults to the computer name."""
     # Make sure we close out the previous control before instantiating a new one.
     global control
     if singleton and control is not None:
@@ -118,17 +124,23 @@ def load(
                 raise ValueError(f"Device {device} is not recognized.")
 
     if singleton:
-        control = Control(core, devices=devices)
+        control = Control(core, devices=devices, setup=setup)
         return control
     else:
-        return Control(core, devices=devices)
+        return Control(core, devices=devices, setup=setup)
+
+
+def setup_name() -> str:
+    """The name of this setup: as given to `load`, else the computer name."""
+    return getattr(control, "setup", None) or platform.node()
 
 
 class Control:
-    def __init__(self, core: CMMCore, devices: list[Any]):
+    def __init__(self, core: CMMCore, devices: list[Any], setup: str | None = None):
         # We can't directly set self.devices = devices since our overriden method
         # depends on self.devices being set.
         super().__setattr__("devices", devices)
+        self.setup = setup or platform.node()
 
         self._core = core
         self._core.setTimeoutMs(100000)

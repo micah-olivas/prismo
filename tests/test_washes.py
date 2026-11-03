@@ -1,10 +1,12 @@
 import itertools
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 from test_binding import PS18K_V3, rig, valve_events  # noqa: F401  (rig is a fixture)
 
+import prismo.control
 from prismo.protocols import _common, washes
 
 NECKS = {PS18K_V3["neckL"], PS18K_V3["neckR"]}
@@ -27,7 +29,8 @@ def series(rig, **kwargs):  # noqa: F811
     washes.sds_wash_series(rig.ctrl, rig.chip, **{**kw, **kwargs})
 
 
-def test_each_wash_is_imaged_and_the_series_ends_dead_ended_in_pbs(rig):  # noqa: F811
+def test_each_wash_is_imaged_and_the_series_ends_dead_ended_in_pbs(rig, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(prismo.control, "control", SimpleNamespace(setup="setup7"))
     series(rig, n_washes=2, exposures=[500, 1000])
 
     assert [r["file"] for r in rig.runs] == [
@@ -51,6 +54,7 @@ def test_each_wash_is_imaged_and_the_series_ends_dead_ended_in_pbs(rig):  # noqa
     with open("patterning_log.json") as f:
         log = json.load(f)
     assert [(e["info"]["wash"], e["completed"]) for e in log] == [(1, True), (2, True)]
+    assert {e["setup"] for e in log} == {"setup7"}
 
 
 def test_necks_are_left_as_they_are(rig):  # noqa: F811

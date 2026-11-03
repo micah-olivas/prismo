@@ -152,15 +152,22 @@ def snap(ctrl: Control) -> np.ndarray:
         ctrl.shutter = "closed"
 
 
-# Camera (and lightpath) name -> camera device name, where they differ: the Zyla is 'camera'.
+# Camera (and lightpath) name -> camera device name in older configs, which call the Zyla 'camera'.
 _CAMERA_DEVICES = {"zyla": "camera"}
+
+
+def _camera_device(ctrl: Control, camera: str) -> str:
+    """The device name of `camera`: `camera` itself, or 'camera' for an older config's Zyla."""
+    if any(d.name == camera for d in ctrl.devices):
+        return camera
+    return _CAMERA_DEVICES.get(camera, camera)
 
 
 def check_camera(ctrl: Control, camera: str | None):
     """Fail before anything moves if `camera` (e.g. "kinetix", "zyla") can't be selected."""
     if camera is None:
         return
-    if not isinstance(device(ctrl, _CAMERA_DEVICES.get(camera, camera)), Camera):
+    if not isinstance(device(ctrl, _camera_device(ctrl, camera)), Camera):
         raise ValueError(f"{camera!r} is not a camera.")
     lightpath = next((d for d in ctrl.devices if d.name == "lightpath"), None)
     if lightpath is not None and camera not in list(lightpath.states):
@@ -171,7 +178,7 @@ def use_camera(ctrl: Control, camera: str | None):
     """Select `camera` and send the light to it, like the notebooks' use_camera. None: keep."""
     if camera is None:
         return
-    ctrl.camera = _CAMERA_DEVICES.get(camera, camera)
+    ctrl.camera = _camera_device(ctrl, camera)
     if any(d.name == "lightpath" for d in ctrl.devices):
         ctrl.lightpath = camera
     ctrl.wait()
