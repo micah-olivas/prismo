@@ -6,7 +6,7 @@ from napari import Viewer
 from qtpy.QtCore import QTimer
 
 from .session import Relay
-from .widgets import BoundarySelector, PositionSelector
+from .widgets import BoundarySelector, GridMap, PositionSelector
 
 
 class LiveView:
@@ -48,6 +48,7 @@ class AcquisitionView:
         self._arrays: set[str] = set()
         self._imgs: dict[str, xr.DataArray] = {}
         self._contrast_set: set[str] = set()
+        self._grid_map: GridMap | None = None  # added with the first tiled array
 
         if tiled or multi:
             img = self._relay.get("img")
@@ -94,6 +95,11 @@ class AcquisitionView:
             xp = xr.open_zarr(self._file, group=arr)
             xp = xp["tile"].assign_attrs(xp.attrs)
             img = tiles_to_image(xp)
+            if self._grid_map is None and "row" in xp.dims and "col" in xp.dims:
+                self._grid_map = GridMap(
+                    self._viewer, xp.sizes["row"], xp.sizes["col"], img.sizes["y"], img.sizes["x"]
+                )
+                self._viewer.window.add_dock_widget(self._grid_map, name="grid position")
 
             layer_names = arr
             if "channel" in img.dims:

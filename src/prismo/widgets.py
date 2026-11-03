@@ -1,9 +1,10 @@
 import functools
+import time
 from collections.abc import Callable
 from typing import Any
 
-from qtpy.QtCore import QPointF, Qt, QTimer
-from qtpy.QtGui import QBrush, QColor, QDoubleValidator, QPainter, QPen
+from qtpy.QtCore import QPointF, QRectF, Qt, QTimer
+from qtpy.QtGui import QColor, QDoubleValidator, QPainter, QPen
 from qtpy.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -56,7 +57,7 @@ def init_widgets(
     if ctrl.stage is not None:
         path = "widget/stage"
         widgets["stage controller"] = lambda r, path=path: StageController(r.subpath(path))
-        server = StageControllerServer(ctrl.stage)
+        server = StageControllerServer(ctrl.stage, ctrl)
         routes = {**routes, **server.routes(path)}
 
     return widgets, routes
@@ -367,89 +368,227 @@ class LightControllerServer:
         self._light.state = int(level)
 
 
+class GridMap(QWidget):
+    """A small map of a tiled acquisition's grid, with a box for the part napari is showing.
+
+    Works from the stitched image's size and its rows and columns alone, so it fits any tiled
+    acquisition. It only repaints when the view moves, and clicking or dragging on it moves the
+    view there.
+    """
+
+    _ACCENT = QColor("#4fc3f7")
+
+    def __init__(self, viewer: Any, rows: int, cols: int, height: int, width: int):
+        super().__init__()
+        self._viewer = viewer
+        self._rows, self._cols = rows, cols
+        self._h, self._w = height, width  # stitched image size, in pixels
+        self._view: tuple[float, float, float, float] | None = None  # y0, x0, y1, x1
+        self._center: tuple[float, float] = (height / 2, width / 2)
+        self.setMinimumSize(120, 120)
+
+        # Camera events fire on every frame of a pan or zoom; repaint at most every 30 ms.
+        self._pending = QTimer()
+        self._pending.setSingleShot(True)
+        self._pending.setInterval(30)
+        self._pending.timeout.connect(self._update_view)
+        viewer.camera.events.center.connect(self._schedule)
+        viewer.camera.events.zoom.connect(self._schedule)
+        canvas = getattr(viewer, "canvas", None)
+        if canvas is not None:
+            canvas.events.size.connect(self._schedule)
+        self._update_view()
+
+    def _schedule(self, event: Any = None):
+        if not self._pending.isActive():
+            self._pending.start()
+
+    def _canvas_size(self) -> tuple[float, float]:
+        canvas = getattr(self._viewer, "canvas", None)
+        size = canvas.size if canvas is not None else getattr(self._viewer, "_canvas_size", None)
+        return tuple(size) if size else (600.0, 800.0)
+
+    def _update_view(self):
+        cy, cx = self._viewer.camera.center[-2:]
+        zoom = self._viewer.camera.zoom or 1.0
+        ch, cw = self._canvas_size()
+        vh, vw = ch / zoom, cw / zoom
+        self._center = (cy, cx)
+        self._view = (cy - vh / 2, cx - vw / 2, cy + vh / 2, cx + vw / 2)
+        self.update()
+
+    def tile_at_center(self) -> tuple[int, int] | None:
+        """The (row, col) shown in the middle of the view, from 0, or None if off the grid."""
+        cy, cx = self._center
+        if not (0 <= cy < self._h and 0 <= cx < self._w):
+            return None
+        return int(cy / self._h * self._rows), int(cx / self._w * self._cols)
+
+    def _map_rect(self) -> tuple[float, float, float, float]:
+        """Where the grid is drawn: left, top, width, height, keeping its aspect ratio."""
+        pad, label_h = 6.0, 18.0
+        aw, ah = self.width() - 2 * pad, self.height() - 2 * pad - label_h
+        s = min(aw / self._w, ah / self._h)
+        w, h = self._w * s, self._h * s
+        return pad + (aw - w) / 2, pad + label_h + (ah - h) / 2, w, h
+
+    def paintEvent(self, event: Any):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        left, top, w, h = self._map_rect()
+        cell_w, cell_h = w / self._cols, h / self._rows
+
+        tile = self.tile_at_center()
+        label = (
+            f"row {tile[0] + 1}/{self._rows}   col {tile[1] + 1}/{self._cols}"
+            if tile is not None
+            else f"off the grid ({self._rows} x {self._cols} tiles)"
+        )
+        p.setPen(QColor("#d0d0d0"))
+        p.drawText(int(left), int(top) - 5, label)
+
+        # The grid: an outline, plus the tile lines when they're far enough apart to see.
+        p.setBrush(QColor(255, 255, 255, 18))
+        p.setPen(QPen(QColor("#8a8f99"), 1))
+        p.drawRect(QRectF(left, top, w, h))
+        p.setPen(QPen(QColor(138, 143, 153, 90), 1))
+        if cell_w >= 3:
+            for c in range(1, self._cols):
+                x = left + c * cell_w
+                p.drawLine(QPointF(x, top), QPointF(x, top + h))
+        if cell_h >= 3:
+            for r in range(1, self._rows):
+                y = top + r * cell_h
+                p.drawLine(QPointF(left, y), QPointF(left + w, y))
+
+        if tile is not None:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(79, 195, 247, 110))
+            p.drawRect(QRectF(left + tile[1] * cell_w, top + tile[0] * cell_h, cell_w, cell_h))
+
+        # The part of the image in view, clipped to the grid.
+        if self._view is not None:
+            y0, x0, y1, x1 = self._view
+            sx, sy = w / self._w, h / self._h
+            rx0, ry0 = max(left, left + x0 * sx), max(top, top + y0 * sy)
+            rx1, ry1 = min(left + w, left + x1 * sx), min(top + h, top + y1 * sy)
+            if rx1 > rx0 and ry1 > ry0:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(self._ACCENT, 2))
+                p.drawRect(QRectF(rx0, ry0, rx1 - rx0, ry1 - ry0))
+        p.end()
+
+    def _jump(self, pos: Any):
+        left, top, w, h = self._map_rect()
+        y = (pos.y() - top) / h * self._h
+        x = (pos.x() - left) / w * self._w
+        y, x = min(max(y, 0), self._h), min(max(x, 0), self._w)
+        center = tuple(self._viewer.camera.center)
+        self._viewer.camera.center = (*center[:-2], y, x)
+
+    def mousePressEvent(self, event: Any):
+        self._jump(event.position() if hasattr(event, "position") else event.pos())
+
+    def mouseMoveEvent(self, event: Any):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._jump(event.position() if hasattr(event, "position") else event.pos())
+
+
 class StageController(QWidget):
-    _PAD_R = 50
-    _THUMB_R = 16
-    _MAX_SPEED = 5.7459
+    """A d-pad that moves the stage a fixed step per press (held down, it repeats).
+
+    Right is +x and up is +y on the stage, as with the old joystick. The step is picked below
+    the pad; "field" is one camera field of view.
+    """
+
+    _STEPS = ["1 µm", "10 µm", "100 µm", "1 mm", "field"]
+    _ARROWS = {"up": ("▲", 0, 1, 0, 1), "left": ("◀", 1, 0, -1, 0),
+               "right": ("▶", 1, 2, 1, 0), "down": ("▼", 2, 1, 0, -1)}
 
     def __init__(self, relay: "Relay"):
         super().__init__()
         self._relay = relay
-        self._thumb = QPointF(0.0, 0.0)
-        self._last_posted = QPointF(0.0, 0.0)
-        self._dragging = False
-        pad_size = (self._PAD_R + self._THUMB_R + 4) * 2
-        self.setFixedSize(pad_size, pad_size)
-        self._timer = QTimer()
-        self._timer.timeout.connect(self._poll)
-        self._timer.start(100)
+        self._step = "100 µm"
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
-    def _poll(self):
-        if self._thumb != self._last_posted:
-            self._last_posted = QPointF(self._thumb.x(), self._thumb.y())
-            self._relay.post(
-                "set_xy_speed",
-                self._thumb.x() * self._MAX_SPEED,
-                -self._thumb.y() * self._MAX_SPEED,
-            )
+        pad = QGridLayout()
+        pad.setSpacing(4)
+        for name, (arrow, row, col, dx, dy) in self._ARROWS.items():
+            btn = QPushButton(arrow)
+            btn.setFixedSize(44, 44)
+            btn.setAutoRepeat(True)
+            btn.setAutoRepeatDelay(400)
+            btn.setAutoRepeatInterval(250)
+            btn.setStyleSheet(ValveController.button_stylesheet("open"))
+            btn.clicked.connect(functools.partial(self.move, dx, dy))
+            pad.addWidget(btn, row, col)
+        # Keep the pad a tight cross in the middle, however wide the panel is.
+        centered = QHBoxLayout()
+        centered.addStretch(1)
+        centered.addLayout(pad)
+        centered.addStretch(1)
+        layout.addLayout(centered)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx, cy = self.width() / 2, self.height() / 2
-        painter.setPen(QPen(QColor(80, 80, 80), 2))
-        painter.setBrush(QBrush(QColor(40, 40, 40)))
-        painter.drawEllipse(QPointF(cx, cy), self._PAD_R, self._PAD_R)
-        tx = cx + self._thumb.x() * self._PAD_R
-        ty = cy + self._thumb.y() * self._PAD_R
-        color = QColor(220, 220, 220) if self._dragging else QColor(130, 130, 130)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(color))
-        painter.drawEllipse(QPointF(tx, ty), self._THUMB_R, self._THUMB_R)
+        steps = QHBoxLayout()
+        steps.setSpacing(4)
+        self._step_btns: dict[str, QPushButton] = {}
+        for step in self._STEPS:
+            btn = QPushButton(step)
+            btn.setMinimumSize(44, 26)
+            btn.clicked.connect(functools.partial(self.set_step, step))
+            steps.addWidget(btn, 1)
+            self._step_btns[step] = btn
+        layout.addLayout(steps)
+        layout.addStretch(1)
+        self.set_step(self._step)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-            self._move_thumb(event.pos())
+    def set_step(self, step: str):
+        self._step = step
+        for s, btn in self._step_btns.items():
+            style = ValveController.button_stylesheet("closed" if s == step else "open")
+            btn.setStyleSheet(style + "QPushButton { padding: 4px 6px; margin: 0px; }")
 
-    def mouseMoveEvent(self, event):
-        if self._dragging:
-            self._move_thumb(event.pos())
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False
-            self._thumb = QPointF(0.0, 0.0)
-            self._last_posted = QPointF(0.0, 0.0)
-            self._relay.post("set_xy_speed", 0.0, 0.0)
-            self.update()
-
-    def _move_thumb(self, pos):
-        cx, cy = self.width() / 2, self.height() / 2
-        dx = (pos.x() - cx) / self._PAD_R
-        dy = (pos.y() - cy) / self._PAD_R
-        mag = (dx**2 + dy**2) ** 0.5
-        if mag > 1.0:
-            dx /= mag
-            dy /= mag
-        self._thumb = QPointF(dx, dy)
-        self.update()
+    def move(self, dx: int, dy: int):
+        self._relay.post("move", dx, dy, self._step)
 
 
 class StageControllerServer:
-    def __init__(self, stage: devices.Stage):
+    # Successive presses add to where the last one was headed, rather than to a position read
+    # mid-move, unless the stage has been left alone this long.
+    _TARGET_S = 2.0
+
+    def __init__(self, stage: devices.Stage, ctrl: "Control | None" = None):
         self._stage = stage
+        self._ctrl = ctrl
+        self._target: tuple[float, float] | None = None
+        self._last_move = 0.0
 
     def routes(self, path: str) -> dict[str, Callable[..., Any]]:
-        return {
-            path + "/set_xy_speed": self.set_xy_speed,
-        }
+        return {path + "/move": self.move}
 
-    def set_xy_speed(self, vx: float, vy: float):
-        try:
-            self._stage.set_xy_speed(vx, vy)
-        except Exception:
-            pass
+    def step_um(self, step: str) -> tuple[float, float]:
+        """The step (x, y) in µm. "field" is the camera's field of view, from its pixel size."""
+        if step == "field":
+            core = self._ctrl._core
+            px = float(self._ctrl.px_len)
+            return core.getImageWidth() * px, core.getImageHeight() * px
+        value, unit = step.split()
+        um = float(value) * (1000.0 if unit == "mm" else 1.0)
+        return um, um
+
+    def move(self, dx: int, dy: int, step: str):
+        sx, sy = self.step_um(step)
+        units = getattr(self._stage, "units_per_um", 1.0)
+        now = time.monotonic()
+        if self._target is None or now - self._last_move > self._TARGET_S:
+            x, y = self._stage.xy
+        else:
+            x, y = self._target
+        self._target = (x + dx * sx * units, y + dy * sy * units)
+        self._last_move = now
+        self._stage.xy = self._target
 
 
 class ValveController(QWidget):
