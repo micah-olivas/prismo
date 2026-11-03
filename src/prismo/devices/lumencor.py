@@ -57,9 +57,10 @@ class SolaLight:
 
 
 class LightShutter:
-    """A software shutter for scopes without one: closing it turns the light down to 0.
+    """Shutter control for microscopes with no mechanical shutter, such as the Ti.
 
-    The light keeps the level it was last set to and goes back to it when the shutter opens.
+    There is no physical shutter. Setting the state to "closed" sets the light's power to 0, and
+    "open" sets it back to the level it was last given (``c.light``), which is kept while closed.
     Opening pauses `settle_s` so the light is fully on before a snap starts: at short exposures
     the Zyla otherwise starts exposing before the light comes up, leaving a dark band across
     the middle of the image (where its exposure starts).
