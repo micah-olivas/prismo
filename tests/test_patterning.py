@@ -253,3 +253,53 @@ def test_minichip_load_opens_only_its_lane():
     flowing = [s for s in snaps if {"in2", "inlet"} <= s]
     assert flowing and all(s & io == {"0_0", "1_1", "2_1"} for s in flowing)
     assert snaps[-1] == dead_end
+
+
+def test_test_mode_warns_moves_the_same_valves_and_is_logged(tmp_path, monkeypatch):
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda msg: prompts.append(msg) or "")
+    real_chip, real = make_chip(MINICHIP)
+    patterning.pattern_minichip_to_anti_egfp(
+        real_chip, bbsa="in4", na="in3", pbs="in1", log_file=None, blocking=True
+    )
+
+    test_chip, test = make_chip(MINICHIP)
+    log = tmp_path / "log.json"
+    with pytest.warns(UserWarning, match="TEST mode"):
+        patterning.pattern_minichip_to_anti_egfp(
+            test_chip, bbsa="in4", na="in3", pbs="in1", log_file=str(log), blocking=True, test=True
+        )
+    assert len(prompts) == 1 and "TEST MODE" in prompts[0]
+    assert test.history == real.history  # identical valve sequence
+
+    (entry,) = json.loads(log.read_text())
+    assert entry["test"] is True and entry["completed"] is True
+    assert all(s["seconds"] == _common.TEST_STEP_S for s in entry["steps"])
+    assert [s["nominal"] for s in entry["steps"]][:3] == [30, 120, 300]
+
+
+def test_real_runs_do_not_warn_and_are_logged_as_not_test(tmp_path, recwarn):
+    chip, _ = make_chip(MINICHIP)
+    log = tmp_path / "log.json"
+    patterning.load_minichip_anti_egfp(
+        chip, io=3, anti_egfp="in2", pbs="in1", log_file=str(log), blocking=True
+    )
+    assert not [w for w in recwarn if "TEST mode" in str(w.message)]
+    (entry,) = json.loads(log.read_text())
+    assert entry["test"] is False
+
+
+@pytest.mark.parametrize("reply", ["n", EOFError])
+def test_test_mode_cancelled_or_unconfirmed_moves_no_valves(monkeypatch, reply):
+    def fake_input(msg):
+        if reply is EOFError:
+            raise EOFError
+        return reply
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    chip, driver = make_chip(MINICHIP)
+    with pytest.warns(UserWarning, match="TEST mode"), pytest.raises(RuntimeError):
+        patterning.pattern_minichip_to_anti_egfp(
+            chip, bbsa="in4", na="in3", pbs="in1", log_file=None, blocking=True, test=True
+        )
+    assert driver.written == set()
