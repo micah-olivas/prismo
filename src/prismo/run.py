@@ -1,3 +1,4 @@
+import logging
 import threading
 import warnings
 from collections.abc import Callable, Iterator
@@ -8,14 +9,36 @@ import numpy as np
 import zarr as zr
 
 from .control import Control, setup_name
+from .scope import scope_attrs
 from .session import Session
 from .views import AcquisitionView, LiveView
 from .widgets import init_widgets
+
+logger = logging.getLogger(__name__)
 
 
 def _setup(ctrl: Control) -> str:
     # A Control loaded before `setup` existed (e.g. in a live kernel) falls back to setup_name().
     return getattr(ctrl, "setup", None) or setup_name()
+
+
+def _save_scope(ctrl: Control, session: Session):
+    """Save the scope settings (scope.scope_attrs) with each array that doesn't have them yet.
+
+    They are read after the step that made the array, so normally at its first tile, once the
+    acq_func has set the optics. Attrs that the acq_func set itself are kept.
+    """
+    new = [xp for xp in session.arrays.values() if "scope_read_at" not in xp.attrs]
+    if not new:
+        return
+    try:
+        attrs = scope_attrs(ctrl)
+    except Exception as e:  # the settings are never worth stopping an acquisition for
+        logger.warning(f"Could not read the scope settings: {e}")
+        attrs = dict(scope_read_at=f"<unreadable: {e}>")
+    for xp in new:
+        for name, value in attrs.items():
+            xp.attrs.setdefault(name, value)
 
 
 def run_async[**P](func: Callable[P, Iterator[Any]]) -> Callable[P, Any]:
@@ -77,6 +100,7 @@ def acq(ctrl: Control, file: str, acq_func: Callable[[Session], Iterator[Any]]) 
     def acq():
         store = zr.storage.LocalStore(file)
         for _ in acq_func(session):
+            _save_scope(ctrl, session)
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Consolidated metadata")
                 for name, xp in session.arrays.items():
@@ -120,6 +144,7 @@ def multi_acq(
         store = zr.storage.LocalStore(file)
         assert pos[0] is not None
         for _ in acq_func(session, pos[0]):
+            _save_scope(ctrl, session)
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Consolidated metadata")
                 for name, xp in session.arrays.items():
@@ -156,7 +181,6 @@ def tiled_acq(
     acq_event = threading.Event()
 
     widgets, widget_routes = init_widgets(ctrl)
-    # TODO: Write additional attrs e.g. px_len.
     session = Session(
         lambda v, r: AcquisitionView(
             v, r, file=file, widgets=widgets, tiled=top_left is None or bot_right is None
@@ -179,6 +203,7 @@ def tiled_acq(
 
         store = zr.storage.LocalStore(file)
         for _ in acq_func(session, xs, ys):
+            _save_scope(ctrl, session)
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Consolidated metadata")
                 for name, xp in session.arrays.items():
