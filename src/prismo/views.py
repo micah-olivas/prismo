@@ -6,7 +6,13 @@ from napari import Viewer
 from qtpy.QtCore import QTimer
 
 from .session import Relay
-from .widgets import BoundarySelector, PositionSelector
+from .widgets import (
+    CHIP_MAP_WIDGET,
+    OWN_PANEL_WIDGETS,
+    RIGHT_PANEL_WIDGETS,
+    BoundarySelector,
+    PositionSelector,
+)
 
 
 class LiveView:
@@ -20,10 +26,14 @@ class LiveView:
         self._timer.start(1000 // 30)
         tabify = False
         for name, widget in widgets.items():
+            # The stage and outlet timer go on the right so the left column still fits on screen.
+            area = "right" if name in RIGHT_PANEL_WIDGETS else "left"
             self._viewer.window.add_dock_widget(
-                widget(self._relay), name=name, tabify=tabify, area="left"
+                widget(self._relay), name=name, tabify=tabify, area=area
             )
-            tabify = True
+            # Filters/shutters and the stage get their own panels; the valve controllers share a
+            # tabbed one.
+            tabify = name not in OWN_PANEL_WIDGETS
 
     def update_img(self):
         img = self._relay.get("img")
@@ -70,14 +80,27 @@ class AcquisitionView:
             self._refresh_timer.timeout.connect(self.refresh)
             self._refresh_timer.start(1000)
 
+        # A click on the chip map moves the stage, so it's only here while positions are picked,
+        # and start_acq takes it away before imaging starts.
+        self._chip_map = None
         tabify = False
         for name, widget in widgets.items():
-            self._viewer.window.add_dock_widget(
-                widget(self._relay), name=name, tabify=tabify, area="left"
-            )
-            tabify = True
+            if name == CHIP_MAP_WIDGET and not (tiled or multi):
+                continue
+            # The stage and outlet timer go on the right so the left column still fits on screen.
+            area = "right" if name in RIGHT_PANEL_WIDGETS else "left"
+            panel = widget(self._relay)
+            self._viewer.window.add_dock_widget(panel, name=name, tabify=tabify, area=area)
+            if name == CHIP_MAP_WIDGET:
+                self._chip_map = panel
+            # Filters/shutters and the stage get their own panels; the valve controllers share a
+            # tabbed one.
+            tabify = name not in OWN_PANEL_WIDGETS
 
     def start_acq(self, *args: Any):
+        if self._chip_map is not None:
+            self._viewer.window.remove_dock_widget(self._chip_map)
+            self._chip_map = None
         self._live_timer.disconnect()
         self._live_timer.stop()
         self._viewer.layers.remove("live")
