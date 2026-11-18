@@ -99,16 +99,20 @@ def _members(chip: Chip | _ChipGroup) -> list[Chip]:
 
 
 class _GuardedChip:
-    """Wraps a Chip: logs every valve command, never commands a neck valve (not even "closed"),
-    and refuses to open any `forbid_open` valve."""
+    """Wraps a Chip: logs every valve command, never commands a neck valve (not even "closed";
+    with `open_necks` they may be opened, and nothing else), and refuses to open any
+    `forbid_open` valve."""
 
-    def __init__(self, chip: Chip | _ChipGroup, forbid_open: Sequence[str]):
+    def __init__(
+        self, chip: Chip | _ChipGroup, forbid_open: Sequence[str], open_necks: bool = False
+    ):
         object.__setattr__(self, "_chip", chip)
         object.__setattr__(self, "_necks", set(_necks(chip)))
         object.__setattr__(self, "_forbid", set(forbid_open))
+        object.__setattr__(self, "_open_necks", open_necks)
 
     def _set(self, key: str, state: str):
-        if key.split("[")[0] in self._necks:
+        if key.split("[")[0] in self._necks and not (self._open_necks and state == "open"):
             raise RuntimeError(f"Refusing to set {key} to {state!r}: necks are left alone.")
         if state != "closed" and key.split("[")[0] in self._forbid:
             raise RuntimeError(f"Refusing to set {key} to {state!r}: it must stay closed.")
@@ -241,6 +245,7 @@ def _launch(
     body: Callable[..., Iterator[None]],
     done_msg: str,
     blocking: bool,
+    open_necks: bool = False,
 ) -> Session:
     """Run `body(guarded_chip, progress)` in a background session with logging and the guard."""
     logger.info(f"{protocol} on {chip.name}: { {k: v for k, v in record.items() if k != 'times'} }")
@@ -253,7 +258,7 @@ def _launch(
         steps=[],
         completed=False,
     )
-    g = _GuardedChip(chip, forbid_open=forbid_open)
+    g = _GuardedChip(chip, forbid_open=forbid_open, open_necks=open_necks)
 
     def steps() -> Iterator[None]:
         entry["start"] = _now()
@@ -286,3 +291,18 @@ def _purge(
     chip[waste] = "open"
     yield from prog.wait(seconds, desc)
     chip[waste] = "closed"
+
+
+def _close_verified(chip: _GuardedChip, valve: str, tries: int = 5) -> Iterator[None]:
+    """Close `valve` and read it back, trying again (1 s apart) after an error or a bad reading."""
+    for attempt in range(1, tries + 1):
+        try:
+            chip[valve] = "closed"
+            if chip[valve] == "closed":
+                return
+            error = "it still reads open"
+        except Exception as e:  # e.g. a dropped connection to the valve controller
+            error = str(e) or type(e).__name__
+        logger.error(f"    closing {valve} failed ({attempt}/{tries}): {error}")
+        yield from sleep(1)
+    raise RuntimeError(f"Could not close {valve} after {tries} tries; close it by hand.")
