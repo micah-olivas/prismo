@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from test_binding import PS18K_V3, rig, valve_events  # noqa: F401  (rig is a fixture)
 
-from prismo.protocols import assays, binding
+from prismo.protocols import _common, assays, binding
 
 NECKS = {PS18K_V3["neckL"], PS18K_V3["neckR"]}
 BUTTONS = {PS18K_V3["butL"], PS18K_V3["butR"]}
@@ -18,8 +18,8 @@ def fakes(rig, monkeypatch):  # noqa: F811
 
 
 def run(rig, file, **kwargs):  # noqa: F811
-    kw = dict(incubations_s=[30, 60], top_left=[0, 0], bot_right=[10, 20])
-    return assays.snap_labeling_kinetics(rig.ctrl, rig.chip, str(file), **{**kw, **kwargs})
+    kw = dict(incubations_s=[30, 60], channel="cy5", top_left=[0, 0], bot_right=[10, 20])
+    return assays.labeling_kinetics(rig.ctrl, rig.chip, str(file), **{**kw, **kwargs})
 
 
 def buttons_at_snaps(rig):  # noqa: F811
@@ -107,3 +107,103 @@ def test_bad_arguments_move_nothing(rig, tmp_path):  # noqa: F811
     with pytest.raises(FileExistsError):
         run(rig, tmp_path / "exists")
     assert rig.events == [] and rig.runs == []
+
+
+def test_wait_times_can_be_a_numpy_array(rig, tmp_path):  # noqa: F811
+    session = run(rig, tmp_path / "k", incubations_s=np.array([5, 10, 20]))
+    imgs = session.arrays["cy5_500ms"]
+    np.testing.assert_allclose(imgs["incubation_s"], [0, 5, 10, 20])
+    assert imgs.attrs["incubations_s"] == [5.0, 10.0, 20.0]
+
+
+def test_the_channel_names_the_array_unless_named(rig, tmp_path):  # noqa: F811
+    session = run(rig, tmp_path / "k", channel="gfp")
+    assert set(session.arrays) == {"gfp_500ms"} and rig.dev("filter").state == "gfp"
+    session = run(rig, tmp_path / "j", channel="gfp", name="dbco_af488")
+    assert set(session.arrays) == {"dbco_af488_500ms"}
+
+
+def test_the_earlier_name_still_images_in_cy5(rig, tmp_path):  # noqa: F811
+    session = assays.snap_labeling_kinetics(
+        rig.ctrl,
+        rig.chip,
+        str(tmp_path / "k"),
+        incubations_s=[5],
+        top_left=[0, 0],
+        bot_right=[1, 1],
+    )
+    assert set(session.arrays) == {"cy5_500ms"} and rig.dev("filter").state == "cy5"
+
+
+def no_sleep(seconds):
+    yield
+
+
+def drop_button_closes(rig, monkeypatch, n):  # noqa: F811
+    """Lose the first `n` commands that close an open butL, as if they never arrived."""
+    driver_cls = type(rig.driver)
+    set_valve = driver_cls.__setitem__
+    drops = iter([True] * n)
+
+    def lossy(self, idx, state):
+        closing_open_button = idx == PS18K_V3["butL"] and state == "closed" and self[idx] == "open"
+        if closing_open_button and next(drops, False):
+            return
+        set_valve(self, idx, state)
+
+    monkeypatch.setattr(_common, "sleep", no_sleep)
+    monkeypatch.setattr(driver_cls, "__setitem__", lossy)
+
+
+def test_no_tile_is_taken_until_the_buttons_read_closed(rig, tmp_path, monkeypatch, caplog):  # noqa: F811
+    drop_button_closes(rig, monkeypatch, 2)
+    run(rig, tmp_path / "k")
+    assert "closing butL failed (2/5): it still reads open" in caplog.text
+    assert set(buttons_at_snaps(rig)) == {("closed", "closed")}
+
+
+def test_a_button_that_will_not_close_stops_before_imaging(rig, tmp_path, monkeypatch):  # noqa: F811
+    drop_button_closes(rig, monkeypatch, 99)
+    with pytest.raises(RuntimeError, match="Could not close butL"):
+        run(rig, tmp_path / "k")
+    assert len([e for e in rig.events if e[0] == "snap"]) == 4  # the baseline only
+    assert rig.dev("shutter").state == "closed"
+    assert not rig.driver.written & NECKS
+
+
+def test_simulated_labeling_halves_what_is_left_every_half_time():
+    table = assays.simulate_labeling([60, 120], [60, 60, 120], plot=False, return_table=True)
+    assert list(table["incubation_s"]) == [0, 60, 60, 120]
+    np.testing.assert_allclose(table["buttons_open_s"], [0, 60, 120, 240])
+    np.testing.assert_allclose(table["t½=60s"], [0, 0.5, 0.75, 0.9375])
+    np.testing.assert_allclose(table["t½=120s"], [0, 1 - 2**-0.5, 0.5, 0.75])
+    single = assays.simulate_labeling(30, np.array([30]), plot=False, return_table=True)
+    np.testing.assert_allclose(single["t½=30s"], [0, 0.5])
+
+
+def test_simulated_labeling_plot():
+    plt = pytest.importorskip("matplotlib.pyplot")
+    plt.switch_backend("Agg")
+    _, ax = plt.subplots()
+    assert assays.simulate_labeling([10, 100], [5, 5, 10, 60, 300], ax=ax) is None
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == ["10 s", "100 s"]
+    assert ax.get_xscale() == "linear" and ax.get_xlabel() == "Buttons-open time (min)"
+    _, ax = plt.subplots()
+    assays.simulate_labeling([10, 100], [5, 5, 10, 60, 300], log_time=True, ax=ax)
+    assert ax.get_xscale() == "log" and ax.get_xlabel() == "Buttons-open time"
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["5 s", "10 s", "30 s", "1 min", "5 min"]
+    _, ax = plt.subplots()  # 1 s to 27 min: every other tick
+    assays.simulate_labeling(60, [1, 5, 10, 120, 300, 300, 300, 300], log_time=True, ax=ax)
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["1 s", "10 s", "1 min", "10 min"]
+    plt.close("all")
+
+
+def test_simulated_labeling_bad_arguments():
+    with pytest.raises(ValueError, match="half_times_s"):
+        assays.simulate_labeling([], [5], plot=False)
+    with pytest.raises(ValueError, match="half_times_s"):
+        assays.simulate_labeling([0, 10], [5], plot=False)
+    with pytest.raises(ValueError, match="incubations_s"):
+        assays.simulate_labeling(5, [], plot=False)
+    with pytest.raises(ValueError, match="at most 8"):
+        assays.simulate_labeling(list(range(1, 10)), [5])
