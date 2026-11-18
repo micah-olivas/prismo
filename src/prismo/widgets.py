@@ -82,20 +82,17 @@ def init_widgets(
             server = ValveControllerServer(device)
             routes = {**routes, **server.routes(path)}
 
-    # Only devices with a discrete list of states can be shown as a dropdown.
+    # Only devices with a discrete list of states can be shown as buttons. Filters and shutters
+    # are already in their own panel, and the stage d-pad above replaces the stage controller.
     state_devices = [
-        d for d in ctrl.devices if isinstance(d, devices.State) and hasattr(d, "states")
+        d
+        for d in ctrl.devices
+        if isinstance(d, devices.State) and hasattr(d, "states") and d not in optics
     ]
     if state_devices:
         path = "widget/states"
         widgets["state controller"] = lambda r, path=path: StateController(r.subpath(path))
         server = StateControllerServer(state_devices)
-        routes = {**routes, **server.routes(path)}
-
-    if ctrl.stage is not None:
-        path = "widget/stage"
-        widgets["stage controller"] = lambda r, path=path: StageController(r.subpath(path))
-        server = StageControllerServer(ctrl.stage)
         routes = {**routes, **server.routes(path)}
 
     return widgets, routes
