@@ -32,6 +32,17 @@ Example (PS1.8k v2, high anti-eGFP on the left side, low anti-eGFP on the right)
         high_side="L",
     )
 
+Example (minichip, start to finish: one anti-eGFP in every lane, Feb-Jul 2026 timings)::
+
+    from prismo.protocols.patterning import pattern_minichip_anti_egfp
+
+    p = pattern_minichip_anti_egfp(
+        c.d2_minichip_v2, bbsa="in4", na="in3", anti_egfp="in2", pbs="in1"
+    )
+
+For a different anti-eGFP per lane, run ``pattern_minichip_to_anti_egfp`` and then
+``load_minichip_anti_egfp`` once per condition.
+
 Pass a list of chips, e.g. ``[c.d1_ps_2block_v2, c.d2_ps_2block_v2]``, to pattern several
 devices at once in lockstep. They must have the same valve names and the same inlets, and every
 valve command goes to all of them.
@@ -79,7 +90,26 @@ STANDARD_TIMES = dict(
     anti_egfp_closed_post=30,
     pbs_wash_anti_egfp=10 * 60,
 )
-# Shortened minichip patterning (from 2026-07), with every buttons-open step at 5 min.
+# Minichip patterning as run Feb-Jul 2026 (the notebooks' pattern_minichip): bBSA and neutravidin
+# 10 min with the buttons open, anti-eGFP 4 min.
+MINICHIP_TIMES = dict(
+    bbsa_purge=30,
+    bbsa_closed=2 * 60,
+    bbsa_open=10 * 60,
+    pbs_purge=30,
+    pbs_wash1=2 * 60,
+    na_purge=30,
+    na=10 * 60,
+    pbs_wash2=3 * 60,
+    quench=10 * 60,
+    pbs_wash3=3 * 60,
+    anti_egfp_purge=30,
+    anti_egfp_closed_pre=30,
+    anti_egfp_open=4 * 60,
+    anti_egfp_closed_post=30,
+    pbs_wash_anti_egfp=4 * 60,
+)
+# Shorter minichip patterning (from 2026-10, 261026-Minichip), every buttons-open step at 5 min.
 MINICHIP_SHORT_TIMES = dict(
     bbsa_purge=30,
     bbsa_closed=2 * 60,
@@ -133,10 +163,10 @@ MINICHIP_IO_LANES = {
 }
 
 
-def _check_times(times: dict[str, int], steps: Sequence[str]):
+def _check_times(times: dict[str, int], steps: Sequence[str], preset: str = "STANDARD_TIMES"):
     missing = [k for k in steps if k not in times]
     if missing:
-        raise ValueError(f"times is missing {missing}; start from STANDARD_TIMES.")
+        raise ValueError(f"times is missing {missing}; start from {preset}.")
 
 
 def _require_necks_closed(chip: Chip | _ChipGroup | _GuardedChip):
@@ -460,8 +490,106 @@ def pattern_anti_egfp_high_low(
     )
 
 
+def pattern_minichip_anti_egfp(
+    chip: Chip | Sequence[Chip],
+    *,
+    bbsa: str,
+    na: str,
+    anti_egfp: str,
+    pbs: str,
+    waste: str = "waste",
+    outlet: str = "out",
+    inlet: str = "inlet",
+    button: str = "but",
+    sandwich: str = "sand",
+    lanes: dict[int, tuple[str, ...]] = MINICHIP_IO_LANES,
+    times: dict[str, int] = MINICHIP_TIMES,
+    info: dict[str, Any] | None = None,
+    log_file: str | None = LOG_FILE,
+    blocking: bool = False,
+) -> Session:
+    """Minichip, start to finish: bBSA, neutravidin, the bBSA quench and one anti-eGFP, all lanes.
+
+    The full patterning in one call, as pattern_anti_egfp does for the PS1.8k: every IO lane is
+    open throughout, so every chamber gets the same anti-eGFP. Ends dead-ended in PBS with the
+    buttons closed and all lanes open. For a different anti-eGFP per lane, use
+    pattern_minichip_to_anti_egfp and then load_minichip_anti_egfp for each condition instead.
+
+    Parameters:
+    -----------
+    chip :
+        A minichip Chip, or a list of minichips (e.g. [d1, d2]) to pattern in lockstep: same valve
+        names and inlets on each, every valve command sent to all of them.
+    bbsa, na, anti_egfp, pbs :
+        Inlets holding biotinylated BSA, neutravidin, biotinylated anti-eGFP and PBS.
+    waste :
+        Inlet used to purge air from the other inlets.
+    outlet :
+        Outlet valve.
+    inlet, button, sandwich :
+        The device's common inlet, button and sandwich valves.
+    lanes :
+        IO multiplexer valves to open for each lane (see MINICHIP_IO_LANES).
+    times :
+        Step times in seconds: MINICHIP_TIMES (Feb-Jul 2026 runs), MINICHIP_SHORT_TIMES (every
+        buttons-open step 5 min) or STANDARD_TIMES (full length).
+    info :
+        Free-form notes saved in the patterning log, e.g. {"anti_egfp_ug_ml": 10}.
+    log_file :
+        JSON log appended to after the run (None to disable).
+    blocking :
+        Wait for the protocol to finish before returning.
+    """
+    chip = _as_chip(chip)
+    io_valves = sorted({v for vs in lanes.values() for v in vs})
+    roles = dict(bbsa=bbsa, na=na, anti_egfp=anti_egfp, pbs=pbs, waste=waste, outlet=outlet)
+    _check(chip, roles, [inlet, button, sandwich, *io_valves])
+    _check_times(times, _TO_ANTI_EGFP_STEPS + _ANTI_EGFP_STEPS, "MINICHIP_TIMES")
+    necks = _necks(chip)
+    _require_necks_closed(chip)
+
+    def body(g: _GuardedChip, prog: _Progress) -> Iterator[None]:
+        _require_necks_closed(g)  # read-only; the necks are never commanded
+        g.close_all()
+        _set_all(g, io_valves, "open")
+        g[sandwich] = "open"
+        g[outlet] = "open"
+        yield from _bbsa_na_quench(
+            g, times, prog, bbsa=bbsa, na=na, pbs=pbs, waste=waste, inlet=inlet, buttons=[button]
+        )
+        yield from _flow_anti_egfp(
+            g,
+            times,
+            prog,
+            anti_egfp=anti_egfp,
+            pbs=pbs,
+            waste=waste,
+            inlet=inlet,
+            buttons=[button],
+            keep_closed=necks,
+            label="Step 4: anti-eGFP",
+        )
+        _deadend(g, pbs, inlet, [sandwich, *io_valves])
+
+    total = sum(times[k] for k in _TO_ANTI_EGFP_STEPS + _ANTI_EGFP_STEPS)
+    done = f"Patterning done; dead-ended in PBS ({pbs}), buttons closed."
+    record = {**roles, "io": sorted(lanes), "times": times}
+    return _launch(
+        chip,
+        "pattern_minichip_anti_egfp",
+        record,
+        info,
+        log_file,
+        total,
+        necks,
+        body,
+        done,
+        blocking,
+    )
+
+
 def pattern_minichip_to_anti_egfp(
-    chip: Chip,
+    chip: Chip | Sequence[Chip],
     *,
     bbsa: str,
     na: str,
@@ -485,7 +613,8 @@ def pattern_minichip_to_anti_egfp(
     Parameters:
     -----------
     chip :
-        A minichip Chip.
+        A minichip Chip, or a list of minichips to pattern in lockstep (as in
+        pattern_minichip_anti_egfp).
     bbsa, na, pbs :
         Inlets holding biotinylated BSA, neutravidin and PBS.
     waste :
@@ -505,10 +634,11 @@ def pattern_minichip_to_anti_egfp(
     blocking :
         Wait for the protocol to finish before returning.
     """
+    chip = _as_chip(chip)
     io_valves = sorted({v for vs in lanes.values() for v in vs})
     roles = dict(bbsa=bbsa, na=na, pbs=pbs, waste=waste, outlet=outlet)
     _check(chip, roles, [inlet, button, sandwich, *io_valves])
-    _check_times(times, _TO_ANTI_EGFP_STEPS)
+    _check_times(times, _TO_ANTI_EGFP_STEPS, "MINICHIP_SHORT_TIMES")
     necks = _necks(chip)
     _require_necks_closed(chip)
 
@@ -541,7 +671,7 @@ def pattern_minichip_to_anti_egfp(
 
 
 def load_minichip_anti_egfp(
-    chip: Chip,
+    chip: Chip | Sequence[Chip],
     *,
     io: int | Sequence[int],
     anti_egfp: str,
@@ -565,7 +695,7 @@ def load_minichip_anti_egfp(
     Parameters:
     -----------
     chip :
-        A minichip Chip.
+        A minichip Chip, or a list of minichips to load in lockstep (the same lane(s) on each).
     io :
         Lane (0-7), or a list of lanes, to load, e.g. 3 or range(8) for every lane.
     anti_egfp, pbs :
@@ -590,12 +720,13 @@ def load_minichip_anti_egfp(
     io_list = [io] if isinstance(io, int) else list(io)
     if not io_list or any(i not in lanes for i in io_list):
         raise ValueError(f"io must be lane(s) from {list(lanes)}, got {io!r}.")
+    chip = _as_chip(chip)
     io_valves = sorted({v for vs in lanes.values() for v in vs})
     lane_valves = sorted({v for i in io_list for v in lanes[i]})
     others = [v for v in io_valves if v not in lane_valves]
     roles = dict(anti_egfp=anti_egfp, pbs=pbs, waste=waste, outlet=outlet)
     _check(chip, roles, [inlet, button, sandwich, *io_valves])
-    _check_times(times, _ANTI_EGFP_STEPS)
+    _check_times(times, _ANTI_EGFP_STEPS, "MINICHIP_SHORT_TIMES")
     necks = _necks(chip)
 
     def body(g: _GuardedChip, prog: _Progress) -> Iterator[None]:

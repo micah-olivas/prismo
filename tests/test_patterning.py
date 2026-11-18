@@ -253,3 +253,76 @@ def test_minichip_load_opens_only_its_lane():
     flowing = [s for s in snaps if {"in2", "inlet"} <= s]
     assert flowing and all(s & io == {"0_0", "1_1", "2_1"} for s in flowing)
     assert snaps[-1] == dead_end
+
+
+MINICHIP_D1 = {k: v - 16 for k, v in MINICHIP.items()}
+MINICHIP_FULL = dict(bbsa="in4", na="in3", anti_egfp="in2", pbs="in1")
+MINICHIP_IO = {v for vs in patterning.MINICHIP_IO_LANES.values() for v in vs}
+
+
+def test_full_minichip_pattern_runs_every_step_through_every_lane(tmp_path):
+    chip, driver = make_chip(MINICHIP)
+    patterning.pattern_minichip_anti_egfp(chip, **MINICHIP_FULL, info={"ug_ml": 10}, blocking=True)
+    snaps = opened(driver.history, MINICHIP)
+
+    # bBSA, neutravidin and the anti-eGFP all flow through every lane into the chambers.
+    for reagent in ("in4", "in3", "in2"):
+        flowing = [s for s in snaps if {reagent, "inlet"} <= s]
+        assert flowing and all({"sand", "out", *MINICHIP_IO} <= s for s in flowing)
+    anti_egfp = [s for s in snaps if {"in2", "inlet"} <= s]
+    assert any("but" in s for s in anti_egfp) and "but" not in anti_egfp[-1]
+    # bBSA flows before neutravidin, and the anti-eGFP comes last.
+    first = {r: next(i for i, s in enumerate(snaps) if {r, "inlet"} <= s) for r in ("in4", "in3")}
+    assert first["in4"] < first["in3"] < snaps.index(anti_egfp[0])
+    # Ends dead-ended in PBS: buttons and outlet closed, every lane open.
+    assert snaps[-1] == {"sand", "inlet", "in1", *MINICHIP_IO}
+
+    (entry,) = json.loads((tmp_path / patterning.LOG_FILE).read_text())
+    assert entry["protocol"] == "pattern_minichip_anti_egfp" and entry["completed"] is True
+    assert entry["times"] == patterning.MINICHIP_TIMES and entry["info"] == {"ug_ml": 10}
+    assert len(entry["steps"]) == 10 + 5
+
+
+def test_minichip_times_presets_cover_every_step():
+    steps = patterning._TO_ANTI_EGFP_STEPS + patterning._ANTI_EGFP_STEPS
+    for preset in (patterning.MINICHIP_TIMES, patterning.MINICHIP_SHORT_TIMES):
+        assert set(preset) == set(steps)
+    # The Feb-Jul runs: 10 min bBSA and neutravidin, 4 min anti-eGFP, buttons open.
+    t = patterning.MINICHIP_TIMES
+    assert (t["bbsa_open"], t["na"], t["anti_egfp_open"]) == (600, 600, 240)
+
+
+def test_bad_minichip_times_name_the_preset_and_move_nothing():
+    chip, driver = make_chip(MINICHIP)
+    with pytest.raises(ValueError, match="start from MINICHIP_TIMES"):
+        patterning.pattern_minichip_anti_egfp(chip, **MINICHIP_FULL, times={})
+    with pytest.raises(ValueError, match="start from MINICHIP_SHORT_TIMES"):
+        patterning.load_minichip_anti_egfp(chip, io=0, anti_egfp="in2", pbs="in1", times={})
+    assert driver.written == set()
+
+
+def test_minichips_run_in_lockstep(tmp_path):
+    solo_chip, solo_driver = make_chip(MINICHIP)
+    patterning.pattern_minichip_anti_egfp(solo_chip, **MINICHIP_FULL, blocking=True)
+    solo = opened(solo_driver.history, MINICHIP)
+
+    driver = FakeDriver()
+    d1 = Chip("d1", driver, dict(MINICHIP_D1))
+    d2 = Chip("d2", driver, dict(MINICHIP))
+    patterning.pattern_minichip_anti_egfp([d1, d2], **MINICHIP_FULL, blocking=True)
+    for mapping in (MINICHIP_D1, MINICHIP):
+        snaps = opened([s & set(mapping.values()) for s in driver.history], mapping)
+        assert dedupe(snaps) == dedupe(solo)
+    assert json.loads((tmp_path / patterning.LOG_FILE).read_text())[-1]["chip"] == "d1+d2"
+
+    # The two-part protocol takes a list too: the same lane loads on both.
+    patterning.pattern_minichip_to_anti_egfp(
+        [d1, d2], bbsa="in4", na="in3", pbs="in1", blocking=True
+    )
+    driver.history.clear()
+    patterning.load_minichip_anti_egfp([d1, d2], io=3, anti_egfp="in2", pbs="in1", blocking=True)
+    for mapping in (MINICHIP_D1, MINICHIP):
+        snaps = opened([s & set(mapping.values()) for s in driver.history], mapping)
+        flowing = [s for s in snaps if {"in2", "inlet"} <= s]
+        assert flowing and all(s & MINICHIP_IO == {"0_0", "1_1", "2_1"} for s in flowing)
+        assert snaps[-1] == {"sand", "inlet", "in1", *MINICHIP_IO}
