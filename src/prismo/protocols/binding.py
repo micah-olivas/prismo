@@ -39,6 +39,7 @@ from .imaging import (
     check_camera,
     check_optics,
     mark_tile,
+    resolve_defaults,
     set_optics,
     snake,
     snap,
@@ -71,9 +72,9 @@ def track_binding(
     exposure: int = 500,
     channel: str = "gfp",
     power: int = 100,
-    light_source: str | None = "sola",
+    light_source: str | None = "auto",
     name: str = "egfp",
-    camera: str | None = "kinetix",
+    camera: str | None = "auto",
     overlap: float = 0.1,
     info: dict[str, Any] | None = None,
 ) -> Session:
@@ -94,12 +95,13 @@ def track_binding(
         pass takes longer than this, the next one starts right away.
     exposure, channel, power, light_source :
         Exposure (ms), filter cube, light power and light source (None if there is no
-        ``light_source`` device). The shutter only opens while a tile is snapped.
+        ``light_source`` device; "auto" uses "sola" if there is one). The shutter only opens while a tile is snapped.
     name :
         The images are saved as array ``{name}_{exposure}ms`` in `file`.
     camera :
         Camera to image with, selected (and the lightpath sent to it) before tiling, like
-        ``use_camera``: "kinetix" or "zyla". None keeps the current camera.
+        ``use_camera``: "kinetix" or "zyla". None keeps the current camera; "auto"
+        picks the Kinetix if there is one, else keeps the current camera.
     overlap :
         Tile overlap, as in ``pm.tiled_acq``.
     info :
@@ -111,6 +113,7 @@ def track_binding(
         raise ValueError("passes must be at least 1, interval_s at least 0, exposure positive.")
     if os.path.exists(file):
         raise FileExistsError(f"{file} already exists; pick a new name.")
+    camera, light_source = resolve_defaults(ctrl, camera, light_source)
     check_optics(ctrl, channel, light_source)
     check_camera(ctrl, camera)
 

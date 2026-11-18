@@ -32,14 +32,14 @@ class Filter:
 
     @property
     def state(self) -> int | str:
+        # Never move the turret here: the GUI reads this constantly, including mid-move.
         try:
             if isinstance(self.states[0], int):
                 return self._core.getState(self.name)
             else:
                 return self._core.getStateLabel(self.name)
         except Exception:
-            self.state = self.states[0]
-            return self.states[0]
+            return "unknown"
 
     @state.setter
     def state(self, new_state: int | str):

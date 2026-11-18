@@ -44,8 +44,8 @@ def tile_image(
     bot_right: Sequence[float],
     exposure: int = 500,
     power: int = 100,
-    light_source: str | None = "sola",
-    camera: str | None = "kinetix",
+    light_source: str | None = "auto",
+    camera: str | None = "auto",
     overlap: float = 0.1,
     info: dict[str, Any] | None = None,
 ) -> Session:
@@ -64,10 +64,11 @@ def tile_image(
         Corners of the device for `camera`, e.g. ``d1_top_left`` and ``d1_bottom_right``.
     exposure, power, light_source :
         Exposure (ms), light power and light source (None if there is no ``light_source``
-        device). The shutter only opens while a tile is snapped.
+        device; "auto" uses "sola" if there is one). The shutter only opens while a tile is snapped.
     camera :
         Camera to image with, selected (and the lightpath sent to it) before tiling, like
-        ``use_camera``: "kinetix" or "zyla". None keeps the current camera.
+        ``use_camera``: "kinetix" or "zyla". None keeps the current camera; "auto"
+        picks the Kinetix if there is one, else keeps the current camera.
     overlap :
         Tile overlap, as in ``pm.tiled_acq``.
     info :
@@ -79,6 +80,7 @@ def tile_image(
         raise ValueError("exposure must be positive.")
     if os.path.exists(file):
         raise FileExistsError(f"{file} already exists; pick a new name.")
+    camera, light_source = resolve_defaults(ctrl, camera, light_source)
     check_optics(ctrl, channel, light_source)
     check_camera(ctrl, camera)
 
@@ -105,6 +107,19 @@ def device(ctrl: Control, name: str) -> Any:
             return d
     # Control silently stores unknown attributes, so a missing device would never be set.
     raise ValueError(f"No device named {name!r} in the config.")
+
+
+def resolve_defaults(
+    ctrl: Control, camera: str | None, light_source: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve "auto": the Kinetix and the sola light source where the scope has them (the Ti2),
+    otherwise the current camera and no light source (the Ti)."""
+    names = {d.name for d in ctrl.devices}
+    if camera == "auto":
+        camera = "kinetix" if "kinetix" in names else None
+    if light_source == "auto":
+        light_source = "sola" if "light_source" in names else None
+    return camera, light_source
 
 
 def check_optics(ctrl: Control, channel: str, light_source: str | None):
