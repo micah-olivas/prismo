@@ -130,6 +130,13 @@ def set_optics(ctrl: Control, channel: str, exposure: int, power: int, light_sou
 
 def snap(ctrl: Control) -> np.ndarray:
     """Snap with the shutter open only for the exposure."""
+    camera = ctrl.camera
+    if hasattr(camera, "snap_shuttered"):  # the Kinetix times the shutter itself (kinetix.py)
+
+        def shutter(is_open: bool):
+            ctrl.shutter = "open" if is_open else "closed"
+
+        return camera.snap_shuttered(shutter)
     ctrl.shutter = "open"
     try:
         return ctrl.snap()
