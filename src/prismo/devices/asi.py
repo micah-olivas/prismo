@@ -22,12 +22,34 @@ def _wait(cmd: Callable[[str], str], timeout: float = 60.0):
 
 
 class Stage:
-    def __init__(self, name: str, port: str | None = None, units_per_um: float = 1.0):
+    def __init__(
+        self,
+        name: str,
+        port: str | None = None,
+        units_per_um: float = 1.0,
+        counts_per_um: float = 1.0,
+        flip_x: bool = False,
+    ):
         self.name = name
         # Stage units per micron: 10 on controllers that count in 0.1 um. Positions stay in stage
         # units; this is only used to convert distances measured in microns, like tile sizes.
         self.units_per_um = units_per_um
+        # Or convert positions themselves: controller counts per micron (10 for 0.1 um counts), so
+        # x, y and moves are in microns. Use one or the other, or tile steps get scaled twice.
+        if counts_per_um <= 0:
+            raise ValueError(f"counts_per_um must be positive, got {counts_per_um}.")
+        if counts_per_um != 1 and units_per_um != 1:
+            raise ValueError("Set units_per_um or counts_per_um for an ASI stage, not both.")
+        self._counts_per_um = counts_per_um
+        # flip_x mirrors the x axis (e.g. after a controller reset reversed it).
+        self._x_sign = -1 if flip_x else 1
         self._port = Port(VID, PID, port, baudrate=9600, timeout=2.0)
+
+    def _to_counts(self, x: float, y: float) -> tuple[float, float]:
+        return self._x_sign * float(x) * self._counts_per_um, float(y) * self._counts_per_um
+
+    def _from_counts(self, x: float, y: float) -> tuple[float, float]:
+        return self._x_sign * x / self._counts_per_um, y / self._counts_per_um
 
     def _cmd(self, cmd: str) -> str:
         response = self._port.write_readline((cmd + "\r").encode()).decode().strip()
@@ -44,30 +66,30 @@ class Stage:
     @property
     def x(self) -> float:
         resp = self._cmd("WHERE X")
-        return float(resp.split(" ")[1])
+        return self._from_counts(float(resp.split(" ")[1]), 0)[0]
 
     @x.setter
     def x(self, new_x: float):
-        self._cmd(f"MOVE X={float(new_x):.4f}")
+        self._cmd(f"MOVE X={self._to_counts(new_x, 0)[0]:.4f}")
 
     @property
     def y(self) -> float:
         resp = self._cmd("WHERE Y")
-        return float(resp.split(" ")[1])
+        return self._from_counts(0, float(resp.split(" ")[1]))[1]
 
     @y.setter
     def y(self, new_y: float):
-        self._cmd(f"MOVE Y={float(new_y):.4f}")
+        self._cmd(f"MOVE Y={self._to_counts(0, new_y)[1]:.4f}")
 
     @property
     def xy(self) -> np.ndarray:
         resp = self._cmd("WHERE X Y").split(" ")
-        x, y = float(resp[1]), float(resp[2])
-        return np.array([x, y])
+        return np.array(self._from_counts(float(resp[1]), float(resp[2])))
 
     @xy.setter
     def xy(self, new_xy: tuple[float, float]):
-        self._cmd(f"MOVE X={float(new_xy[0]):.4f} Y={float(new_xy[1]):.4f}")
+        x, y = self._to_counts(*new_xy)
+        self._cmd(f"MOVE X={x:.4f} Y={y:.4f}")
 
     @property
     def x_speed(self) -> float:
@@ -91,11 +113,13 @@ class Stage:
         self._cmd(f"VE X={float(vx)} Y={float(vy)}")
 
     def __iadd__(self, delta: tuple[float, float]) -> "Stage":
-        self._cmd(f"MOVREL X={float(delta[0]):.4f} Y={float(delta[1]):.4f}")
+        dx, dy = self._to_counts(*delta)
+        self._cmd(f"MOVREL X={dx:.4f} Y={dy:.4f}")
         return self
 
     def __isub__(self, delta: tuple[float, float]) -> "Stage":
-        self._cmd(f"MOVREL X={-float(delta[0]):.4f} Y={-float(delta[1]):.4f}")
+        dx, dy = self._to_counts(*delta)
+        self._cmd(f"MOVREL X={-dx:.4f} Y={-dy:.4f}")
         return self
 
 
