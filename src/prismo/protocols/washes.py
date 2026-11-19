@@ -228,6 +228,7 @@ def sds_wash(
     info: dict[str, Any] | None = None,
     log_file: str | None = LOG_FILE,
     blocking: bool = False,
+    test: bool = False,
 ) -> Session:
     """Wash a single-common-inlet device once with SDS (15 min), then PBS (10 min).
 
@@ -253,6 +254,9 @@ def sds_wash(
         JSON log appended to after the run (None to disable).
     blocking :
         Wait for the wash to finish before returning.
+    test :
+        Test mode: move the valves as in a real run, but make every timed step last 1 s. Warns
+        and waits for Enter before any valve moves; the run is marked ``"test": true`` in the log.
     """
     roles = dict(sds=sds, pbs=pbs, waste=waste, outlet=outlet)
     _check(chip, roles, [inlet, *buttons, *sandwiches])
@@ -279,7 +283,9 @@ def sds_wash(
     total = (2 * _SDS_PURGE_S if purge else 0) + _SDS_S + _SDS_PBS_S
     done = "SDS wash done; dead-ended in PBS."
     forbid = list(buttons)
-    return _launch(chip, "sds_wash", roles, info, log_file, total, forbid, body, done, blocking)
+    return _launch(
+        chip, "sds_wash", roles, info, log_file, total, forbid, body, done, blocking, test=test
+    )
 
 
 def sds_wash_series(

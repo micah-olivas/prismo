@@ -9,7 +9,9 @@ import datetime
 import json
 import logging
 import os
+import sys
 import time
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -29,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Every protocol run (patterning and washes) is appended here, in the working directory.
 LOG_FILE = "patterning_log.json"
+
+# With test=True every timed step lasts this long instead (the valves still move for real).
+TEST_STEP_S = 1
 
 
 def protocol_running(session: Any) -> bool:
@@ -153,8 +158,9 @@ class _Progress:
     Also records the start time of every timed step in `steps`.
     """
 
-    def __init__(self, total_s: int, desc: str, steps: list[dict[str, Any]]):
+    def __init__(self, total_s: int, desc: str, steps: list[dict[str, Any]], test: bool = False):
         self.steps = steps
+        self.test = test
         self.bar = None
         if tqdm is not None:
             self.bar = tqdm(
@@ -166,6 +172,17 @@ class _Progress:
 
     def wait(self, seconds: int, desc: str) -> Iterator[None]:
         seconds = int(seconds)
+        if self.test:
+            # Keep the bar's proportions, but only wait TEST_STEP_S per step.
+            desc = f"[TEST] {desc}"
+            logger.info(f"{desc} ({TEST_STEP_S} s instead of {seconds // 60}:{seconds % 60:02d})")
+            self.steps.append(dict(step=desc, start=_now(), seconds=TEST_STEP_S, nominal=seconds))
+            if self.bar is not None:
+                self.bar.set_description(desc)
+            yield from sleep(TEST_STEP_S)
+            if self.bar is not None:
+                self.bar.update(seconds)
+            return
         logger.info(f"{desc} ({seconds // 60}:{seconds % 60:02d})")
         self.steps.append(dict(step=desc, start=_now(), seconds=seconds))
         if self.bar is None:
@@ -234,6 +251,29 @@ def _append_log(path: str | None, entry: dict[str, Any]):
         logger.error(f"Could not write {path}: {e}\n{entry}")
 
 
+def _caller_stacklevel(frame: Any) -> int:
+    """warnings.warn stack level, counted from `frame` (the function calling warnings.warn), of
+    the first frame outside prismo and its beartype wrappers, i.e. the user's cell."""
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    level = 1
+    while frame is not None:
+        f = frame.f_code.co_filename
+        if not (f.startswith("<@beartype") or os.path.abspath(f).startswith(pkg)):
+            return level
+        frame, level = frame.f_back, level + 1
+    return 2
+
+
+def _confirm_test(protocol: str):
+    """Block until the user presses Enter; anything else (or no way to ask) cancels the run."""
+    try:
+        answer = input(f"TEST MODE ({protocol}): press Enter to run, or type n to cancel: ")
+    except (EOFError, OSError) as e:  # no interactive stdin, so nobody confirmed
+        raise RuntimeError(f"{protocol}: test mode needs confirmation, but input failed.") from e
+    if answer.strip():
+        raise RuntimeError(f"{protocol}: test run cancelled; no valves were moved.")
+
+
 def _launch(
     chip: Chip | _ChipGroup,
     protocol: str,
@@ -246,8 +286,22 @@ def _launch(
     done_msg: str,
     blocking: bool,
     open_necks: bool = False,
+    test: bool = False,
 ) -> Session:
-    """Run `body(guarded_chip, progress)` in a background session with logging and the guard."""
+    """Run `body(guarded_chip, progress)` in a background session with logging and the guard.
+
+    With `test`, the valves move exactly as in a real run but every timed step lasts only
+    TEST_STEP_S seconds. It warns and waits for Enter before any valve moves, and the log entry
+    is marked ``"test": true``.
+    """
+    if test:
+        msg = (
+            f"{protocol} is in TEST mode: the valves really move, but every step lasts "
+            f"{TEST_STEP_S} s. Do not use this run for an experiment."
+        )
+        warnings.warn(msg, UserWarning, stacklevel=_caller_stacklevel(sys._getframe()))
+        _confirm_test(protocol)
+        done_msg = f"[TEST] {done_msg}"
     logger.info(f"{protocol} on {chip.name}: { {k: v for k, v in record.items() if k != 'times'} }")
     entry = dict(
         protocol=protocol,
@@ -257,12 +311,13 @@ def _launch(
         info=info or {},
         steps=[],
         completed=False,
+        test=test,
     )
     g = _GuardedChip(chip, forbid_open=forbid_open, open_necks=open_necks)
 
     def steps() -> Iterator[None]:
         entry["start"] = _now()
-        prog = _Progress(total_s, protocol, entry["steps"])
+        prog = _Progress(total_s, protocol, entry["steps"], test=test)
         try:
             yield from body(g, prog)
             entry["completed"] = True

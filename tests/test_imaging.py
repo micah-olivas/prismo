@@ -23,7 +23,26 @@ def test_tiles_once_in_the_chosen_channel_on_the_kinetix(rig, tmp_path):  # noqa
             assert rig.events[i - 1] == ("shutter", "open")
             assert rig.events[i + 1] == ("shutter", "closed")
     assert not np.isnan(imgs["seconds"].values).any()
+    assert (imgs["tile_power"].values == 100).all()
+    assert (imgs["tile_exposure_ms"].values == 200).all()
     assert (tmp_path / "GFP").is_dir()
+
+
+def test_records_the_power_each_tile_was_snapped_at(rig, tmp_path):  # noqa: F811
+    # Turning the power down mid-run (e.g. from the napari slider) shows up per tile.
+    kinetix = rig.dev("kinetix")
+    snap = kinetix.snap
+
+    def snap_then_turn_down():
+        img = snap()
+        if kinetix.n == 2:
+            rig.ctrl.light = 40
+        return img
+
+    kinetix.snap = snap_then_turn_down
+    imgs = tile(rig, tmp_path / "a", power=60).arrays["gfp_500ms"]
+    assert sorted(imgs["tile_power"].values.ravel()) == [40, 40, 60, 60]
+    assert imgs.attrs["power"] == 60
 
 
 def test_camera_none_keeps_the_current_one(rig, tmp_path):  # noqa: F811

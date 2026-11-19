@@ -1,3 +1,4 @@
+import time
 from typing import Literal
 
 from pymmcore import CMMCore
@@ -56,16 +57,23 @@ class SolaLight:
 
 
 class LightShutter:
-    """A software shutter for scopes without one: closing it turns the light down to 0.
+    """Shutter control for microscopes with no mechanical shutter, such as the Ti.
 
-    The light keeps the level it was last set to and goes back to it when the shutter opens.
+    There is no physical shutter. Setting the state to "closed" sets the light's power to 0, and
+    "open" sets it back to the level it was last given (``c.light``), which is kept while closed.
+    Opening pauses `settle_s` so the light is fully on before a snap starts: at short exposures
+    the Zyla otherwise starts exposing before the light comes up, leaving a dark band across
+    the middle of the image (where its exposure starts).
     """
 
     states: list[str | int | float] = ["open", "closed"]
 
-    def __init__(self, name: str, light: SolaLight):
+    def __init__(self, name: str, light: SolaLight, settle_s: float = 0.05):
+        if settle_s < 0:
+            raise ValueError(f"settle_s must be at least 0, got {settle_s}.")
         self.name = name
         self._light = light
+        self._settle_s = settle_s
         # Start closed, like a real shutter.
         self.state = "closed"
 
@@ -77,7 +85,11 @@ class LightShutter:
     def state(self, new_state: str):
         if new_state not in self.states:
             raise ValueError(f"Shutter state must be one of {self.states}, got {new_state!r}.")
+        was_open = self._light._gated and self._light._gate_open
         self._light.gate(new_state == "open")
+        if new_state == "open" and not was_open:
+            self._light.wait()
+            time.sleep(self._settle_s)
 
 
 class RetraLight:

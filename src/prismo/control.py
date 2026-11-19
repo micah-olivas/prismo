@@ -76,7 +76,9 @@ def load(
                         f"light_shutter needs a sola_light or spectra_light named "
                         f"{params['light']!r} earlier in the config."
                     )
-                devices.append(dev.lumencor.LightShutter(name, light))
+                devices.append(
+                    dev.lumencor.LightShutter(name, light, settle_s=params.get("settle_s", 0.05))
+                )
             case "manual_objective":
                 devices.append(dev.manual.Objective(name, **params))
             case "microfluidic_chip":

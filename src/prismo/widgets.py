@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 from qtpy.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from qtpy.QtGui import QBrush, QColor, QDoubleValidator, QPainter, QPen
+from qtpy.QtGui import QColor, QDoubleValidator, QPainter, QPen
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -17,6 +17,8 @@ from qtpy.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
+    QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -82,18 +84,28 @@ def init_widgets(
             server = ValveControllerServer(device)
             routes = {**routes, **server.routes(path)}
 
-    # Only devices with a discrete list of states can be shown as buttons. Filters and shutters
-    # are already in their own panel, and the stage d-pad above replaces the stage controller.
+    # One panel for the other optics: a row of buttons per device with discrete states
+    # (filters and shutters have their own panel) and a slider per light, since lights have a
+    # level (c.light = 0-100). The exposure is set in the filters & shutters panel.
     state_devices = [
         d
         for d in ctrl.devices
         if isinstance(d, devices.State) and hasattr(d, "states") and d not in optics
     ]
-    if state_devices:
+    lights = [d for d in ctrl.devices if isinstance(d, devices.lumencor.SolaLight)]
+    has_camera = False  # the exposure box is in the filters & shutters panel
+    if state_devices or lights:
         path = "widget/states"
-        widgets["state controller"] = lambda r, path=path: StateController(r.subpath(path))
+        light_names = [d.name for d in lights]
+        widgets["optics"] = lambda r, path=path: StateController(
+            r.subpath(path), light_names, exposure=has_camera
+        )
         server = StateControllerServer(state_devices)
         routes = {**routes, **server.routes(path)}
+        for light in lights:
+            routes = {**routes, **LightControllerServer(light).routes(f"{path}/{light.name}")}
+        if has_camera:
+            routes = {**routes, **ExposureControllerServer(ctrl).routes(f"{path}/exposure")}
 
     return widgets, routes
 
@@ -254,7 +266,10 @@ class PositionSelector(QWidget):
 
 
 class StateController(QWidget):
-    def __init__(self, relay: "Relay"):
+    """The optics panel: a row of buttons per state device, a power slider per light, and the
+    camera's exposure."""
+
+    def __init__(self, relay: "Relay", lights: list[str] | None = None, exposure: bool = False):
         super().__init__()
         self._relay = relay
         self._states: dict[str, str | int | float] = self._relay.get("states")
@@ -262,22 +277,45 @@ class StateController(QWidget):
         self._btns: dict[str, dict[str, QPushButton]] = {}
         self._shown: dict[str, str] = {}
         grid = QGridLayout(self)
-        grid.setHorizontalSpacing(0)
-        grid.setVerticalSpacing(0)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
         self._timer = QTimer()
         self._timer.timeout.connect(self.update_states)
         self._timer.start(10)
 
-        # One row per device: its name, then a button for each state.
-        for row, name in enumerate(self._states):
-            grid.addWidget(QLabel(name), row, 0)
+        # The light's power and the exposure go right under the shutter, since they're used
+        # together.
+        rows: list[tuple[str, str]] = [(name, "state") for name in self._states]
+        at = next((i + 1 for i, (n, _) in enumerate(rows) if n == "shutter"), len(rows))
+        extra = [(name, "light") for name in lights or []]
+        if exposure:
+            extra.append(("exposure", "exposure"))
+        rows[at:at] = extra
+
+        # One row per device: its name, then its buttons (sharing the row equally), slider or box.
+        for row, (name, kind) in enumerate(rows):
+            label = QLabel(name)
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            grid.addWidget(label, row, 0)
+            if kind == "light":
+                grid.addWidget(LightController(self._relay.subpath(name)), row, 1)
+                continue
+            if kind == "exposure":
+                grid.addWidget(ExposureController(self._relay.subpath("exposure")), row, 1)
+                continue
+            line = QHBoxLayout()
+            line.setSpacing(4)
             self._btns[name] = {}
-            for col, opt in enumerate(self._options[name], start=1):
+            for opt in self._options[name]:
                 btn = QPushButton(str(opt))
-                btn.setMinimumWidth(10)
+                btn.setMinimumSize(44, 26)
                 btn.clicked.connect(functools.partial(self.set_state, name, opt))
-                grid.addWidget(btn, row, col)
+                line.addWidget(btn, 1)
                 self._btns[name][str(opt)] = btn
+            grid.addLayout(line, row, 1)
+        grid.setRowStretch(len(rows), 1)  # keep the rows together at the top
         self.update_states()
 
     def update_states(self):
@@ -289,9 +327,8 @@ class StateController(QWidget):
             self._shown[name] = str(state)
             for opt, btn in self._btns[name].items():
                 # Highlight the current state with the same style as a closed valve.
-                btn.setStyleSheet(
-                    ValveController.button_stylesheet("closed" if opt == str(state) else "open")
-                )
+                style = ValveController.button_stylesheet("closed" if opt == str(state) else "open")
+                btn.setStyleSheet(style + "QPushButton { padding: 4px 6px; margin: 0px; }")
 
     def set_state(self, name: str, state: str | int | float):
         self._relay.post("set_state", name, state)
@@ -318,89 +355,360 @@ class StateControllerServer:
         self._devices[name].state = state
 
 
-class StageController(QWidget):
-    _PAD_R = 50
-    _THUMB_R = 16
-    _MAX_SPEED = 5.7459
+class LightController(QWidget):
+    """A slider and box for the light level (c.light), e.g. to turn the power down while imaging."""
 
     def __init__(self, relay: "Relay"):
         super().__init__()
         self._relay = relay
-        self._thumb = QPointF(0.0, 0.0)
-        self._last_posted = QPointF(0.0, 0.0)
-        self._dragging = False
-        pad_size = (self._PAD_R + self._THUMB_R + 4) * 2
-        self.setFixedSize(pad_size, pad_size)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 100)
+        self._box = QSpinBox()
+        self._box.setRange(0, 100)
+        self._box.setSuffix(" %")
+        self._box.setMinimumWidth(64)
+        layout.addWidget(self._slider, 1)
+        layout.addWidget(self._box)
+
+        level = self._relay.get("level")
+        self._slider.setValue(level)
+        self._box.setValue(level)
+        # Only send the level once the slider is let go, so dragging doesn't flood the light.
+        self._slider.sliderReleased.connect(lambda: self.set_level(self._slider.value()))
+        self._slider.valueChanged.connect(self._slider_moved)
+        self._box.editingFinished.connect(lambda: self.set_level(self._box.value()))
+
+        # Show changes made from the notebook too (e.g. a protocol setting the power).
         self._timer = QTimer()
-        self._timer.timeout.connect(self._poll)
-        self._timer.start(100)
+        self._timer.timeout.connect(self.update_level)
+        self._timer.start(250)
 
-    def _poll(self):
-        if self._thumb != self._last_posted:
-            self._last_posted = QPointF(self._thumb.x(), self._thumb.y())
-            self._relay.post(
-                "set_xy_speed",
-                self._thumb.x() * self._MAX_SPEED,
-                -self._thumb.y() * self._MAX_SPEED,
+    def _slider_moved(self, value: int):
+        self._box.blockSignals(True)
+        self._box.setValue(value)
+        self._box.blockSignals(False)
+        # Clicks and arrow keys move the slider without a release.
+        if not self._slider.isSliderDown():
+            self.set_level(value)
+
+    def update_level(self):
+        if self._slider.isSliderDown() or self._box.hasFocus():
+            return
+        level = self._relay.get("level")
+        for w in (self._slider, self._box):
+            if w.value() != level:
+                w.blockSignals(True)
+                w.setValue(level)
+                w.blockSignals(False)
+
+    def set_level(self, level: int):
+        self._relay.post("set_level", level)
+
+
+class ExposureController(QWidget):
+    """A box for the camera's exposure (c.exposure), in ms, with buttons to halve or double it."""
+
+    def __init__(self, relay: "Relay"):
+        super().__init__()
+        self._relay = relay
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._box = QDoubleSpinBox()
+        self._box.setRange(0.01, 100000.0)
+        self._box.setDecimals(2)
+        self._box.setSuffix(" ms")
+        self._box.setMinimumWidth(96)
+        self._box.setValue(self._relay.get("ms"))
+        self._box.editingFinished.connect(lambda: self.set_ms(self._box.value()))
+        layout.addWidget(self._box, 1)
+        for text, factor in (("÷2", 0.5), ("×2", 2.0)):
+            btn = QPushButton(text)
+            btn.setMinimumSize(36, 26)
+            btn.setStyleSheet(
+                ValveController.button_stylesheet("open")
+                + "QPushButton { padding: 4px 6px; margin: 0px; }"
             )
+            btn.clicked.connect(functools.partial(self.scale, factor))
+            layout.addWidget(btn)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx, cy = self.width() / 2, self.height() / 2
-        painter.setPen(QPen(QColor(80, 80, 80), 2))
-        painter.setBrush(QBrush(QColor(40, 40, 40)))
-        painter.drawEllipse(QPointF(cx, cy), self._PAD_R, self._PAD_R)
-        tx = cx + self._thumb.x() * self._PAD_R
-        ty = cy + self._thumb.y() * self._PAD_R
-        color = QColor(220, 220, 220) if self._dragging else QColor(130, 130, 130)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(color))
-        painter.drawEllipse(QPointF(tx, ty), self._THUMB_R, self._THUMB_R)
+        # Show changes made from the notebook too (e.g. a protocol setting the exposure).
+        self._timer = QTimer()
+        self._timer.timeout.connect(self.update_ms)
+        self._timer.start(250)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-            self._move_thumb(event.pos())
+    def update_ms(self):
+        if self._box.hasFocus():
+            return
+        ms = self._relay.get("ms")
+        if abs(self._box.value() - ms) > 1e-6:
+            self._box.blockSignals(True)
+            self._box.setValue(ms)
+            self._box.blockSignals(False)
 
-    def mouseMoveEvent(self, event):
-        if self._dragging:
-            self._move_thumb(event.pos())
+    def scale(self, factor: float):
+        ms = min(max(self._box.value() * factor, self._box.minimum()), self._box.maximum())
+        self._box.setValue(ms)
+        self.set_ms(ms)
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False
-            self._thumb = QPointF(0.0, 0.0)
-            self._last_posted = QPointF(0.0, 0.0)
-            self._relay.post("set_xy_speed", 0.0, 0.0)
-            self.update()
+    def set_ms(self, ms: float):
+        self._relay.post("set_ms", ms)
 
-    def _move_thumb(self, pos):
-        cx, cy = self.width() / 2, self.height() / 2
-        dx = (pos.x() - cx) / self._PAD_R
-        dy = (pos.y() - cy) / self._PAD_R
-        mag = (dx**2 + dy**2) ** 0.5
-        if mag > 1.0:
-            dx /= mag
-            dy /= mag
-        self._thumb = QPointF(dx, dy)
+
+class ExposureControllerServer:
+    def __init__(self, ctrl: "Control"):
+        self._ctrl = ctrl
+
+    def routes(self, path: str) -> dict[str, Callable[..., Any]]:
+        return {path + "/ms": self.get_ms, path + "/set_ms": self.set_ms}
+
+    def get_ms(self) -> float:
+        return float(self._ctrl.exposure)
+
+    def set_ms(self, ms: float):
+        self._ctrl.exposure = float(ms)
+
+
+class LightControllerServer:
+    def __init__(self, light: devices.lumencor.SolaLight):
+        self._light = light
+
+    def routes(self, path: str) -> dict[str, Callable[..., Any]]:
+        return {path + "/level": self.get_level, path + "/set_level": self.set_level}
+
+    def get_level(self) -> int:
+        return int(self._light.state)
+
+    def set_level(self, level: int):
+        self._light.state = int(level)
+
+
+class GridMap(QWidget):
+    """A small map of a tiled acquisition's grid, with a box for the part napari is showing.
+
+    Works from the stitched image's size and its rows and columns alone, so it fits any tiled
+    acquisition. It only repaints when the view moves, and clicking or dragging on it moves the
+    view there.
+    """
+
+    _ACCENT = QColor("#4fc3f7")
+
+    def __init__(self, viewer: Any, rows: int, cols: int, height: int, width: int):
+        super().__init__()
+        self._viewer = viewer
+        self._rows, self._cols = rows, cols
+        self._h, self._w = height, width  # stitched image size, in pixels
+        self._view: tuple[float, float, float, float] | None = None  # y0, x0, y1, x1
+        self._center: tuple[float, float] = (height / 2, width / 2)
+        self.setMinimumSize(120, 120)
+
+        # Camera events fire on every frame of a pan or zoom; repaint at most every 30 ms.
+        self._pending = QTimer()
+        self._pending.setSingleShot(True)
+        self._pending.setInterval(30)
+        self._pending.timeout.connect(self._update_view)
+        viewer.camera.events.center.connect(self._schedule)
+        viewer.camera.events.zoom.connect(self._schedule)
+        canvas = getattr(viewer, "canvas", None)
+        if canvas is not None:
+            canvas.events.size.connect(self._schedule)
+        self._update_view()
+
+    def _schedule(self, event: Any = None):
+        if not self._pending.isActive():
+            self._pending.start()
+
+    def _canvas_size(self) -> tuple[float, float]:
+        canvas = getattr(self._viewer, "canvas", None)
+        size = canvas.size if canvas is not None else getattr(self._viewer, "_canvas_size", None)
+        return tuple(size) if size else (600.0, 800.0)
+
+    def _update_view(self):
+        cy, cx = self._viewer.camera.center[-2:]
+        zoom = self._viewer.camera.zoom or 1.0
+        ch, cw = self._canvas_size()
+        vh, vw = ch / zoom, cw / zoom
+        self._center = (cy, cx)
+        self._view = (cy - vh / 2, cx - vw / 2, cy + vh / 2, cx + vw / 2)
         self.update()
+
+    def tile_at_center(self) -> tuple[int, int] | None:
+        """The (row, col) shown in the middle of the view, from 0, or None if off the grid."""
+        cy, cx = self._center
+        if not (0 <= cy < self._h and 0 <= cx < self._w):
+            return None
+        return int(cy / self._h * self._rows), int(cx / self._w * self._cols)
+
+    def _map_rect(self) -> tuple[float, float, float, float]:
+        """Where the grid is drawn: left, top, width, height, keeping its aspect ratio."""
+        pad, label_h = 6.0, 18.0
+        aw, ah = self.width() - 2 * pad, self.height() - 2 * pad - label_h
+        s = min(aw / self._w, ah / self._h)
+        w, h = self._w * s, self._h * s
+        return pad + (aw - w) / 2, pad + label_h + (ah - h) / 2, w, h
+
+    def paintEvent(self, event: Any):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        left, top, w, h = self._map_rect()
+        cell_w, cell_h = w / self._cols, h / self._rows
+
+        tile = self.tile_at_center()
+        label = (
+            f"row {tile[0] + 1}/{self._rows}   col {tile[1] + 1}/{self._cols}"
+            if tile is not None
+            else f"off the grid ({self._rows} x {self._cols} tiles)"
+        )
+        p.setPen(QColor("#d0d0d0"))
+        p.drawText(int(left), int(top) - 5, label)
+
+        # The grid: an outline, plus the tile lines when they're far enough apart to see.
+        p.setBrush(QColor(255, 255, 255, 18))
+        p.setPen(QPen(QColor("#8a8f99"), 1))
+        p.drawRect(QRectF(left, top, w, h))
+        p.setPen(QPen(QColor(138, 143, 153, 90), 1))
+        if cell_w >= 3:
+            for c in range(1, self._cols):
+                x = left + c * cell_w
+                p.drawLine(QPointF(x, top), QPointF(x, top + h))
+        if cell_h >= 3:
+            for r in range(1, self._rows):
+                y = top + r * cell_h
+                p.drawLine(QPointF(left, y), QPointF(left + w, y))
+
+        if tile is not None:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(79, 195, 247, 110))
+            p.drawRect(QRectF(left + tile[1] * cell_w, top + tile[0] * cell_h, cell_w, cell_h))
+
+        # The part of the image in view, clipped to the grid.
+        if self._view is not None:
+            y0, x0, y1, x1 = self._view
+            sx, sy = w / self._w, h / self._h
+            rx0, ry0 = max(left, left + x0 * sx), max(top, top + y0 * sy)
+            rx1, ry1 = min(left + w, left + x1 * sx), min(top + h, top + y1 * sy)
+            if rx1 > rx0 and ry1 > ry0:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(self._ACCENT, 2))
+                p.drawRect(QRectF(rx0, ry0, rx1 - rx0, ry1 - ry0))
+        p.end()
+
+    def _jump(self, pos: Any):
+        left, top, w, h = self._map_rect()
+        y = (pos.y() - top) / h * self._h
+        x = (pos.x() - left) / w * self._w
+        y, x = min(max(y, 0), self._h), min(max(x, 0), self._w)
+        center = tuple(self._viewer.camera.center)
+        self._viewer.camera.center = (*center[:-2], y, x)
+
+    def mousePressEvent(self, event: Any):
+        self._jump(event.position() if hasattr(event, "position") else event.pos())
+
+    def mouseMoveEvent(self, event: Any):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._jump(event.position() if hasattr(event, "position") else event.pos())
+
+
+class StageController(QWidget):
+    """A d-pad that moves the stage a fixed step per press (held down, it repeats).
+
+    Right is +x and up is +y on the stage, as with the old joystick. The step is picked below
+    the pad; "field" is one camera field of view.
+    """
+
+    _STEPS = ["1 µm", "10 µm", "100 µm", "1 mm", "field"]
+    _ARROWS = {"up": ("▲", 0, 1, 0, 1), "left": ("◀", 1, 0, -1, 0),
+               "right": ("▶", 1, 2, 1, 0), "down": ("▼", 2, 1, 0, -1)}
+
+    def __init__(self, relay: "Relay"):
+        super().__init__()
+        self._relay = relay
+        self._step = "100 µm"
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        pad = QGridLayout()
+        pad.setSpacing(4)
+        for name, (arrow, row, col, dx, dy) in self._ARROWS.items():
+            btn = QPushButton(arrow)
+            btn.setFixedSize(44, 44)
+            btn.setAutoRepeat(True)
+            btn.setAutoRepeatDelay(400)
+            btn.setAutoRepeatInterval(250)
+            btn.setStyleSheet(ValveController.button_stylesheet("open"))
+            btn.clicked.connect(functools.partial(self.move, dx, dy))
+            pad.addWidget(btn, row, col)
+        # Keep the pad a tight cross in the middle, however wide the panel is.
+        centered = QHBoxLayout()
+        centered.addStretch(1)
+        centered.addLayout(pad)
+        centered.addStretch(1)
+        layout.addLayout(centered)
+
+        steps = QHBoxLayout()
+        steps.setSpacing(4)
+        self._step_btns: dict[str, QPushButton] = {}
+        for step in self._STEPS:
+            btn = QPushButton(step)
+            btn.setMinimumSize(44, 26)
+            btn.clicked.connect(functools.partial(self.set_step, step))
+            steps.addWidget(btn, 1)
+            self._step_btns[step] = btn
+        layout.addLayout(steps)
+        layout.addStretch(1)
+        self.set_step(self._step)
+
+    def set_step(self, step: str):
+        self._step = step
+        for s, btn in self._step_btns.items():
+            style = ValveController.button_stylesheet("closed" if s == step else "open")
+            btn.setStyleSheet(style + "QPushButton { padding: 4px 6px; margin: 0px; }")
+
+    def move(self, dx: int, dy: int):
+        self._relay.post("move", dx, dy, self._step)
 
 
 class StageControllerServer:
-    def __init__(self, stage: devices.Stage):
+    # Successive presses add to where the last one was headed, rather than to a position read
+    # mid-move, unless the stage has been left alone this long.
+    _TARGET_S = 2.0
+
+    def __init__(self, stage: devices.Stage, ctrl: "Control | None" = None):
         self._stage = stage
+        self._ctrl = ctrl
+        self._target: tuple[float, float] | None = None
+        self._last_move = 0.0
 
     def routes(self, path: str) -> dict[str, Callable[..., Any]]:
-        return {
-            path + "/set_xy_speed": self.set_xy_speed,
-        }
+        return {path + "/move": self.move}
 
-    def set_xy_speed(self, vx: float, vy: float):
-        try:
-            self._stage.set_xy_speed(vx, vy)
-        except Exception:
-            pass
+    def step_um(self, step: str) -> tuple[float, float]:
+        """The step (x, y) in µm. "field" is the camera's field of view, from its pixel size."""
+        if step == "field":
+            core = self._ctrl._core
+            px = float(self._ctrl.px_len)
+            return core.getImageWidth() * px, core.getImageHeight() * px
+        value, unit = step.split()
+        um = float(value) * (1000.0 if unit == "mm" else 1.0)
+        return um, um
+
+    def move(self, dx: int, dy: int, step: str):
+        sx, sy = self.step_um(step)
+        units = getattr(self._stage, "units_per_um", 1.0)
+        now = time.monotonic()
+        if self._target is None or now - self._last_move > self._TARGET_S:
+            x, y = self._stage.xy
+        else:
+            x, y = self._target
+        self._target = (x + dx * sx * units, y + dy * sy * units)
+        self._last_move = now
+        self._stage.xy = self._target
 
 
 class ValveController(QWidget):

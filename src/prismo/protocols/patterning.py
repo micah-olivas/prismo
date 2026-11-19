@@ -286,6 +286,7 @@ def pattern_anti_egfp(
     info: dict[str, Any] | None = None,
     log_file: str | None = LOG_FILE,
     blocking: bool = False,
+    test: bool = False,
 ) -> Session:
     """Pattern a bBSA-NA-anti-eGFP pedestal under every button of a single-common-inlet device.
 
@@ -314,6 +315,9 @@ def pattern_anti_egfp(
         JSON log appended to after the run (None to disable).
     blocking :
         Wait for the protocol to finish before returning.
+    test :
+        Test mode: move the valves as in a real run, but make every timed step last 1 s. Warns
+        and waits for Enter before any valve moves; the run is marked ``"test": true`` in the log.
     """
     chip = _as_chip(chip)
     roles = dict(bbsa=bbsa, na=na, anti_egfp=anti_egfp, pbs=pbs, waste=waste, outlet=outlet)
@@ -348,7 +352,17 @@ def pattern_anti_egfp(
     done = f"Patterning done; dead-end filled with {pbs}."
     record = {**roles, "times": times}
     return _launch(
-        chip, "pattern_anti_egfp", record, info, log_file, total, necks, body, done, blocking
+        chip,
+        "pattern_anti_egfp",
+        record,
+        info,
+        log_file,
+        total,
+        necks,
+        body,
+        done,
+        blocking,
+        test=test,
     )
 
 
@@ -370,6 +384,7 @@ def pattern_anti_egfp_high_low(
     info: dict[str, Any] | None = None,
     log_file: str | None = LOG_FILE,
     blocking: bool = False,
+    test: bool = False,
 ) -> Session:
     """Pattern two anti-eGFP densities: `anti_egfp_high` on one side, `anti_egfp_low` on the other.
 
@@ -409,6 +424,9 @@ def pattern_anti_egfp_high_low(
         JSON log appended to after the run (None to disable).
     blocking :
         Wait for the protocol to finish before returning.
+    test :
+        Test mode: move the valves as in a real run, but make every timed step last 1 s. Warns
+        and waits for Enter before any valve moves; the run is marked ``"test": true`` in the log.
     """
     if set(sides) != {"L", "R"} or high_side not in sides:
         raise ValueError(
@@ -487,6 +505,7 @@ def pattern_anti_egfp_high_low(
         body,
         done,
         blocking,
+        test=test,
     )
 
 
@@ -507,6 +526,7 @@ def pattern_minichip_anti_egfp(
     info: dict[str, Any] | None = None,
     log_file: str | None = LOG_FILE,
     blocking: bool = False,
+    test: bool = False,
 ) -> Session:
     """Minichip, start to finish: bBSA, neutravidin, the bBSA quench and one anti-eGFP, all lanes.
 
@@ -539,6 +559,9 @@ def pattern_minichip_anti_egfp(
         JSON log appended to after the run (None to disable).
     blocking :
         Wait for the protocol to finish before returning.
+    test :
+        Test mode: move the valves as in a real run, but make every timed step last 1 s. Warns
+        and waits for Enter before any valve moves; the run is marked ``"test": true`` in the log.
     """
     chip = _as_chip(chip)
     io_valves = sorted({v for vs in lanes.values() for v in vs})
@@ -585,6 +608,7 @@ def pattern_minichip_anti_egfp(
         body,
         done,
         blocking,
+        test=test,
     )
 
 
@@ -604,6 +628,7 @@ def pattern_minichip_to_anti_egfp(
     info: dict[str, Any] | None = None,
     log_file: str | None = LOG_FILE,
     blocking: bool = False,
+    test: bool = False,
 ) -> Session:
     """Minichip: bBSA, neutravidin and the bBSA quench through every IO lane, no anti-eGFP yet.
 
@@ -633,6 +658,9 @@ def pattern_minichip_to_anti_egfp(
         JSON log appended to after the run (None to disable).
     blocking :
         Wait for the protocol to finish before returning.
+    test :
+        Test mode: move the valves as in a real run, but make every timed step last 1 s. Warns
+        and waits for Enter before any valve moves; the run is marked ``"test": true`` in the log.
     """
     chip = _as_chip(chip)
     io_valves = sorted({v for vs in lanes.values() for v in vs})
@@ -667,6 +695,7 @@ def pattern_minichip_to_anti_egfp(
         body,
         done,
         blocking,
+        test=test,
     )
 
 
@@ -686,6 +715,7 @@ def load_minichip_anti_egfp(
     info: dict[str, Any] | None = None,
     log_file: str | None = LOG_FILE,
     blocking: bool = False,
+    test: bool = False,
 ) -> Session:
     """Minichip: flow the anti-eGFP in `anti_egfp` through IO lane(s) `io` only, then PBS-wash them.
 
@@ -716,6 +746,9 @@ def load_minichip_anti_egfp(
         JSON log appended to after the run (None to disable).
     blocking :
         Wait for the protocol to finish before returning.
+    test :
+        Test mode: move the valves as in a real run, but make every timed step last 1 s. Warns
+        and waits for Enter before any valve moves; the run is marked ``"test": true`` in the log.
     """
     io_list = [io] if isinstance(io, int) else list(io)
     if not io_list or any(i not in lanes for i in io_list):
@@ -755,5 +788,15 @@ def load_minichip_anti_egfp(
     done = f"Done with lane(s) {io_list}; dead-ended in PBS."
     record = {**roles, "io": io_list, "io_valves": lane_valves, "times": times}
     return _launch(
-        chip, "load_minichip_anti_egfp", record, info, log_file, total, necks, body, done, blocking
+        chip,
+        "load_minichip_anti_egfp",
+        record,
+        info,
+        log_file,
+        total,
+        necks,
+        body,
+        done,
+        blocking,
+        test=test,
     )
