@@ -240,21 +240,6 @@ def test_sds_wash_leaves_open_neck_alone():
     assert snaps[-1] == {"neck", "sandL", "sandR", "inlet", "in2"}
 
 
-def test_minichip_load_opens_only_its_lane():
-    chip, driver = make_chip(MINICHIP)
-    patterning.pattern_minichip_to_anti_egfp(chip, bbsa="in4", na="in3", pbs="in1", blocking=True)
-    io = set(v for vs in patterning.MINICHIP_IO_LANES.values() for v in vs)
-    dead_end = {"sand", "inlet", "in1", *io}
-    assert opened(driver.history, MINICHIP)[-1] == dead_end
-
-    driver.history.clear()
-    patterning.load_minichip_anti_egfp(chip, io=3, anti_egfp="in2", pbs="in1", blocking=True)
-    snaps = opened(driver.history, MINICHIP)
-    flowing = [s for s in snaps if {"in2", "inlet"} <= s]
-    assert flowing and all(s & io == {"0_0", "1_1", "2_1"} for s in flowing)
-    assert snaps[-1] == dead_end
-
-
 MINICHIP_D1 = {k: v - 16 for k, v in MINICHIP.items()}
 MINICHIP_FULL = dict(bbsa="in4", na="in3", anti_egfp="in2", pbs="in1")
 MINICHIP_IO = {v for vs in patterning.MINICHIP_IO_LANES.values() for v in vs}
@@ -296,8 +281,6 @@ def test_bad_minichip_times_name_the_preset_and_move_nothing():
     chip, driver = make_chip(MINICHIP)
     with pytest.raises(ValueError, match="start from MINICHIP_TIMES"):
         patterning.pattern_minichip_anti_egfp(chip, **MINICHIP_FULL, times={})
-    with pytest.raises(ValueError, match="start from MINICHIP_SHORT_TIMES"):
-        patterning.load_minichip_anti_egfp(chip, io=0, anti_egfp="in2", pbs="in1", times={})
     assert driver.written == set()
 
 
@@ -315,32 +298,18 @@ def test_minichips_run_in_lockstep(tmp_path):
         assert dedupe(snaps) == dedupe(solo)
     assert json.loads((tmp_path / patterning.LOG_FILE).read_text())[-1]["chip"] == "d1+d2"
 
-    # The two-part protocol takes a list too: the same lane loads on both.
-    patterning.pattern_minichip_to_anti_egfp(
-        [d1, d2], bbsa="in4", na="in3", pbs="in1", blocking=True
-    )
-    driver.history.clear()
-    patterning.load_minichip_anti_egfp([d1, d2], io=3, anti_egfp="in2", pbs="in1", blocking=True)
-    for mapping in (MINICHIP_D1, MINICHIP):
-        snaps = opened([s & set(mapping.values()) for s in driver.history], mapping)
-        flowing = [s for s in snaps if {"in2", "inlet"} <= s]
-        assert flowing and all(s & MINICHIP_IO == {"0_0", "1_1", "2_1"} for s in flowing)
-        assert snaps[-1] == {"sand", "inlet", "in1", *MINICHIP_IO}
-
 
 def test_test_mode_warns_moves_the_same_valves_and_is_logged(tmp_path, monkeypatch):
     prompts = []
     monkeypatch.setattr("builtins.input", lambda msg: prompts.append(msg) or "")
     real_chip, real = make_chip(MINICHIP)
-    patterning.pattern_minichip_to_anti_egfp(
-        real_chip, bbsa="in4", na="in3", pbs="in1", log_file=None, blocking=True
-    )
+    patterning.pattern_minichip_anti_egfp(real_chip, **MINICHIP_FULL, log_file=None, blocking=True)
 
     test_chip, test = make_chip(MINICHIP)
     log = tmp_path / "log.json"
     with pytest.warns(UserWarning, match="TEST mode"):
-        patterning.pattern_minichip_to_anti_egfp(
-            test_chip, bbsa="in4", na="in3", pbs="in1", log_file=str(log), blocking=True, test=True
+        patterning.pattern_minichip_anti_egfp(
+            test_chip, **MINICHIP_FULL, log_file=str(log), blocking=True, test=True
         )
     assert len(prompts) == 1 and "TEST MODE" in prompts[0]
     assert test.history == real.history  # identical valve sequence
@@ -348,15 +317,13 @@ def test_test_mode_warns_moves_the_same_valves_and_is_logged(tmp_path, monkeypat
     (entry,) = json.loads(log.read_text())
     assert entry["test"] is True and entry["completed"] is True
     assert all(s["seconds"] == _common.TEST_STEP_S for s in entry["steps"])
-    assert [s["nominal"] for s in entry["steps"]][:3] == [30, 120, 300]
+    assert [s["nominal"] for s in entry["steps"]][:3] == [30, 120, 600]
 
 
 def test_real_runs_do_not_warn_and_are_logged_as_not_test(tmp_path, recwarn):
     chip, _ = make_chip(MINICHIP)
     log = tmp_path / "log.json"
-    patterning.load_minichip_anti_egfp(
-        chip, io=3, anti_egfp="in2", pbs="in1", log_file=str(log), blocking=True
-    )
+    patterning.pattern_minichip_anti_egfp(chip, **MINICHIP_FULL, log_file=str(log), blocking=True)
     assert not [w for w in recwarn if "TEST mode" in str(w.message)]
     (entry,) = json.loads(log.read_text())
     assert entry["test"] is False
@@ -372,7 +339,7 @@ def test_test_mode_cancelled_or_unconfirmed_moves_no_valves(monkeypatch, reply):
     monkeypatch.setattr("builtins.input", fake_input)
     chip, driver = make_chip(MINICHIP)
     with pytest.warns(UserWarning, match="TEST mode"), pytest.raises(RuntimeError):
-        patterning.pattern_minichip_to_anti_egfp(
-            chip, bbsa="in4", na="in3", pbs="in1", log_file=None, blocking=True, test=True
+        patterning.pattern_minichip_anti_egfp(
+            chip, **MINICHIP_FULL, log_file=None, blocking=True, test=True
         )
     assert driver.written == set()
