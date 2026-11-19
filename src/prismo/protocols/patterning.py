@@ -106,7 +106,7 @@ MINICHIP_TIMES = dict(
     anti_egfp_closed_post=30,
     pbs_wash_anti_egfp=4 * 60,
 )
-# Shorter minichip patterning (from 2026-10, 261026-Minichip), every buttons-open step at 5 min.
+# Shorter minichip patterning
 MINICHIP_SHORT_TIMES = dict(
     bbsa_purge=5,
     bbsa_closed=2 * 60,
@@ -117,7 +117,7 @@ MINICHIP_SHORT_TIMES = dict(
     na=3 * 60,
     pbs_wash2=2 * 60,
     quench=3 * 60,
-    pbs_wash3= 2 * 60,
+    pbs_wash3=2 * 60,
     anti_egfp_purge=5,
     anti_egfp_closed_pre=30,
     anti_egfp_open=5 * 60,
